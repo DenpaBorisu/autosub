@@ -43,11 +43,11 @@ build-linux:
   image: python:3.12-slim
   before_script:
     - apt-get update && apt-get install -y --no-install-recommends
-        gcc ccache patchelf
+        gcc make ccache patchelf libc6-dev
         libgl1 libegl1 libdbus-1-3 libxkbcommon0 libglib2.0-0
         libfontconfig1 libfreetype6
         ffmpeg
-    - pip install uv nuitka
+    - pip install uv "nuitka[onefile]"
   script:
     - uv sync
     - uv run nuitka
