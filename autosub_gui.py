@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QColor, QIcon
 
-from transcribe_core import transcribe_file, get_audio_files, SUPPORTED_EXTENSIONS
+from transcribe_core import transcribe_file, get_audio_files, SUPPORTED_EXTENSIONS, get_ffmpeg_path
 from config import Config
 
 MEDIA_EXTENSIONS = SUPPORTED_EXTENSIONS
@@ -64,7 +64,7 @@ class TranscribeWorker(QThread):
                     file_path, output_path=srt_path,
                     overwrite=self.config.overwrite_srt,
                     progress_callback=lambda m: self.progress.emit(m),
-                    ffmpeg_path="ffmpeg",
+                    ffmpeg_path=get_ffmpeg_path(),
                     model_id="8",
                     engine="auto",
                 )

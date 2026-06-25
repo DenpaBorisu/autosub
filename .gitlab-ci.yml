@@ -1,0 +1,106 @@
+stages:
+  - build
+
+variables:
+  # Force fresh clones (PyInstaller/Nuitka don't like cached state)
+  GIT_STRATEGY: clone
+
+# ===========================================================================
+# Windows build — PyInstaller with bundled ffmpeg/ffprobe
+# ===========================================================================
+build-windows:
+  stage: build
+  tags:
+    - shared-windows
+    - windows
+  before_script:
+    - choco install python --version=3.12 -y
+    - $env:Path = "C:\Python312;C:\Python312\Scripts;$env:Path"
+    - python -m pip install --upgrade pip
+    - pip install PyQt6 pyinstaller
+  script:
+    # Download static ffmpeg + ffprobe for Windows
+    - curl -L https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip -o ffmpeg.zip
+    - 7z x ffmpeg.zip -y
+    - cp ffmpeg-master-latest-win64-gpl/bin/ffmpeg.exe .
+    - cp ffmpeg-master-latest-win64-gpl/bin/ffprobe.exe .
+    # Build executable
+    - pyinstaller --onefile --windowed --name AutoSub --add-binary "ffmpeg.exe;." --add-binary "ffprobe.exe;." autosub_gui.py
+  artifacts:
+    name: AutoSub-windows
+    paths:
+      - dist/AutoSub.exe
+    expire_in: 30 days
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ===========================================================================
+# Linux build — Nuitka (smaller binary, native compilation)
+# ===========================================================================
+build-linux:
+  stage: build
+  image: python:3.12-slim
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends
+        gcc ccache patchelf
+        libgl1 libegl1 libdbus-1-3 libxkbcommon0 libglib2.0-0
+        libfontconfig1 libfreetype6
+        ffmpeg
+    - pip install uv nuitka
+  script:
+    - uv sync
+    - uv run nuitka
+        --onefile
+        --enable-plugin=pyqt6
+        --remove-output
+        --lto=yes
+        --nofollow-import-to=PyQt6.QtNetwork
+        --nofollow-import-to=PyQt6.QtSql
+        --nofollow-import-to=PyQt6.QtTest
+        --nofollow-import-to=PyQt6.QtMultimedia
+        --nofollow-import-to=PyQt6.QtSvg
+        --nofollow-import-to=PyQt6.QtSvgWidgets
+        --nofollow-import-to=PyQt6.QtQml
+        --nofollow-import-to=PyQt6.QtQuick
+        --nofollow-import-to=PyQt6.QtQuick3D
+        --nofollow-import-to=PyQt6.QtQuickWidgets
+        --nofollow-import-to=PyQt6.QtQuickControls2
+        --nofollow-import-to=PyQt6.QtWebEngineCore
+        --nofollow-import-to=PyQt6.QtWebEngineWidgets
+        --nofollow-import-to=PyQt6.QtWebChannel
+        --nofollow-import-to=PyQt6.QtWebSockets
+        --nofollow-import-to=PyQt6.QtDesigner
+        --nofollow-import-to=PyQt6.QtPrintSupport
+        --nofollow-import-to=PyQt6.QtBluetooth
+        --nofollow-import-to=PyQt6.QtConcurrent
+        --nofollow-import-to=PyQt6.QtHelp
+        --nofollow-import-to=PyQt6.QtLocation
+        --nofollow-import-to=PyQt6.QtNfc
+        --nofollow-import-to=PyQt6.QtPositioning
+        --nofollow-import-to=PyQt6.QtSensors
+        --nofollow-import-to=PyQt6.QtSerialPort
+        --nofollow-import-to=PyQt6.QtSerialBus
+        --nofollow-import-to=PyQt6.QtTextToSpeech
+        --nofollow-import-to=PyQt6.QtXml
+        --nofollow-import-to=PyQt6.QtPdf
+        --nofollow-import-to=PyQt6.QtPdfWidgets
+        --nofollow-import-to=PyQt6.QtRemoteObjects
+        --nofollow-import-to=PyQt6.QtCharts
+        --nofollow-import-to=PyQt6.QtDataVisualization
+        --nofollow-import-to=PyQt6.QtStateMachine
+        --nofollow-import-to=PyQt6.QtShaderTools
+        --nofollow-import-to=PyQt6.QtOpenGL
+        --nofollow-import-to=PyQt6.QtOpenGLWidgets
+        --nofollow-import-to=PyQt6.QtWaylandCompositor
+        --output-dir=dist
+        --output-filename=AutoSub
+        autosub_gui.py
+  artifacts:
+    name: AutoSub-linux
+    paths:
+      - dist/AutoSub
+    expire_in: 30 days
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

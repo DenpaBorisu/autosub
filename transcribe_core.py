@@ -708,6 +708,30 @@ def utterances_to_srt(utterances: List[dict]) -> str:
 # Audio Extraction & Conversion
 # =============================================================================
 
+def get_ffmpeg_path() -> str:
+    """Resolve the ffmpeg executable path.
+
+    When running as a frozen executable (PyInstaller/Nuitka), bundled
+    ffmpeg/ffprobe binaries are extracted to a temp dir (sys._MEIPASS)
+    or sit next to the executable.  When running from source, returns
+    "ffmpeg" so the system PATH is used.
+    """
+    if getattr(sys, "frozen", False):
+        exe_name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+        # PyInstaller onefile extracts to _MEIPASS
+        base = getattr(sys, "_MEIPASS", None)
+        if base:
+            candidate = os.path.join(base, exe_name)
+            if os.path.isfile(candidate):
+                return candidate
+        # Nuitka / PyInstaller onedir: next to executable
+        exe_dir = os.path.dirname(sys.executable)
+        candidate = os.path.join(exe_dir, exe_name)
+        if os.path.isfile(candidate):
+            return candidate
+    return "ffmpeg"
+
+
 def check_ffmpeg(ffmpeg_path: str = "ffmpeg") -> bool:
     """Check if ffmpeg is available."""
     try:
@@ -760,7 +784,10 @@ MIN_SEGMENTS_PER_MIN = 2  # Sanity threshold: <2 segments/min likely means gaps
 
 def get_audio_duration(audio_path: str, ffmpeg_path: str = "ffmpeg") -> float:
     """Get audio duration in seconds using ffprobe."""
-    ffprobe = ffmpeg_path.replace("ffmpeg", "ffprobe")
+    ffprobe = os.path.join(
+        os.path.dirname(ffmpeg_path),
+        os.path.basename(ffmpeg_path).replace("ffmpeg", "ffprobe")
+    )
     try:
         result = subprocess.run(
             [ffprobe, "-v", "error",
