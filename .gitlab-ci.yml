@@ -49,6 +49,7 @@ build-linux:
         ffmpeg
     - pip install uv "nuitka[onefile]"
   script:
+    - export VERSION=$(grep '^version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
     - uv sync
     - uv run nuitka
         --onefile
@@ -94,12 +95,12 @@ build-linux:
         --nofollow-import-to=PyQt6.QtOpenGLWidgets
         --nofollow-import-to=PyQt6.QtWaylandCompositor
         --output-dir=dist
-        --output-filename=AutoSub
+        --output-filename=AutoSub-${VERSION}
         autosub_gui.py
   artifacts:
-    name: AutoSub-linux
+    name: AutoSub-${VERSION}-linux
     paths:
-      - dist/AutoSub
+      - dist/AutoSub-${VERSION}
     expire_in: 30 days
   rules:
     - if: $CI_COMMIT_TAG

@@ -19,6 +19,13 @@ jobs:
       - name: Install dependencies
         run: pip install PyQt6 pyqtdarktheme pyinstaller
 
+      - name: Get version
+        id: version
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path pyproject.toml -Pattern '^version = "(.*)"').Matches.Groups[1].Value
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+
       - name: Download ffmpeg + ffprobe
         shell: pwsh
         run: |
@@ -28,8 +35,10 @@ jobs:
           Copy-Item ffmpeg-master-latest-win64-gpl\bin\ffprobe.exe .
 
       - name: Build executable
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: >
-          pyinstaller --onefile --windowed --name AutoSub
+          pyinstaller --onefile --windowed --name "AutoSub ${VERSION}"
           --add-binary "ffmpeg.exe;."
           --add-binary "ffprobe.exe;."
           --exclude-module PyQt6.QtNetwork
@@ -72,13 +81,20 @@ jobs:
           --exclude-module PyQt6.QtWaylandCompositor
           autosub_gui.py
 
+      - name: Package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist\AutoSub ${VERSION}.exe" -DestinationPath "AutoSub-${VERSION}-windows.zip"
+
       - uses: actions/upload-artifact@v4
         with:
-          name: AutoSub-windows
-          path: dist/AutoSub.exe
+          name: AutoSub-${{ steps.version.outputs.version }}-windows
+          path: AutoSub-${{ steps.version.outputs.version }}-windows.zip
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/AutoSub.exe
+          files: AutoSub-${{ steps.version.outputs.version }}-windows.zip
