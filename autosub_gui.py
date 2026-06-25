@@ -19,14 +19,12 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QColor, QIcon
 
-from transcribe_core import transcribe_file, get_audio_files
+from transcribe_core import transcribe_file, get_audio_files, SUPPORTED_EXTENSIONS
 from config import Config
 
-MEDIA_EXTENSIONS = {
-    ".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus",
-    ".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".wmv",
-    ".mpg", ".mpeg", ".m4v", ".3gp", ".ts", ".m2ts", ".mpga",
-}
+MEDIA_EXTENSIONS = SUPPORTED_EXTENSIONS
+
+STATUS_ROLE = Qt.ItemDataRole.UserRole + 1  # Stores "ok" / "fail" per item
 
 
 class TranscribeWorker(QThread):
@@ -191,12 +189,12 @@ class AutoSubWindow(QMainWindow):
         add_btn.clicked.connect(self._add_files)
         folder_btn = QPushButton("Add Folder...")
         folder_btn.clicked.connect(self._add_folder)
-        clear_btn = QPushButton("Clear")
-        clear_btn.clicked.connect(self._clear_files)
+        self.clear_btn = QPushButton("Clear")
+        self.clear_btn.clicked.connect(self._clear_files)
         btns.addWidget(add_btn)
         btns.addWidget(folder_btn)
         btns.addStretch()
-        btns.addWidget(clear_btn)
+        btns.addWidget(self.clear_btn)
         main_layout.addLayout(btns)
 
         # Start / Cancel
@@ -318,7 +316,10 @@ class AutoSubWindow(QMainWindow):
     def _add_files(self):
         files, _ = QFileDialog.getOpenFileNames(
             self, "Add Files...",
-            filter="Media Files (*.mp3 *.wav *.mp4 *.mkv *.avi *.mov *.webm *.flac *.m4a *.ogg);;All Files (*)")
+            filter="Media Files (*.mp4 *.mkv *.mov *.avi *.webm *.flv *.wmv "
+                   "*.mpg *.mpeg *.ts *.m2ts *.mts *.vob *.3gp *.ogv *.m4v "
+                   "*.mp3 *.m4a *.aac *.wav *.flac *.ogg *.opus *.wma *.aiff "
+                   "*.ac3 *.amr *.mka *.wv);;All Files (*)")
         for file in files:
             self._add_file(Path(file))
 
@@ -356,6 +357,7 @@ class AutoSubWindow(QMainWindow):
         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         item.setForeground(QColor("#888"))
         self.file_list.addItem(item)
+        self.start_btn.setText("Start")
 
     def _mark_file_done(self, row: int, success: bool):
         if row < 0 or row >= self.file_list.count():
@@ -364,9 +366,11 @@ class AutoSubWindow(QMainWindow):
         if success:
             item.setBackground(QColor("#1b3a1b"))
             item.setForeground(QColor("#4caf50"))
+            item.setData(STATUS_ROLE, "ok")
         else:
             item.setBackground(QColor("#3a1b1b"))
             item.setForeground(QColor("#f44336"))
+            item.setData(STATUS_ROLE, "fail")
         icon = QIcon.fromTheme("dialog-ok" if success else "dialog-error")
         if not icon.isNull():
             item.setIcon(icon)
@@ -380,13 +384,79 @@ class AutoSubWindow(QMainWindow):
             paths.append(Path(item.data(Qt.ItemDataRole.UserRole)))
         return paths
 
+    def _get_files_to_process(self) -> List[Path]:
+        """Files that still need processing — excludes items already marked 'ok'."""
+        paths = []
+        for i in range(self.file_list.count()):
+            item = self.file_list.item(i)
+            if item.flags() == Qt.ItemFlag.NoItemFlags:
+                continue
+            if item.data(STATUS_ROLE) == "ok":
+                continue
+            paths.append(Path(item.data(Qt.ItemDataRole.UserRole)))
+        return paths
+
+    def _get_failed_files(self) -> List[tuple[int, str]]:
+        """Returns list of (row_index, filename) for items marked 'fail'."""
+        failed = []
+        for i in range(self.file_list.count()):
+            item = self.file_list.item(i)
+            if item.flags() == Qt.ItemFlag.NoItemFlags:
+                continue
+            if item.data(STATUS_ROLE) == "fail":
+                failed.append((i, Path(item.data(Qt.ItemDataRole.UserRole)).name))
+        return failed
+
     def _start_processing(self):
-        files = self._get_file_paths()
-        if not files:
-            QMessageBox.warning(self, "No files", "Add some files first!")
-            return
+        is_retry = self.start_btn.text() == "Retry"
+
+        if is_retry:
+            files = self._get_files_to_process()
+            failed = self._get_failed_files()
+            ok_count = sum(
+                1 for i in range(self.file_list.count())
+                if self.file_list.item(i).data(STATUS_ROLE) == "ok"
+            )
+
+            if not files:
+                return
+
+            failed_names = ", ".join(name for _, name in failed[:5])
+            if len(failed) > 5:
+                failed_names += f" and {len(failed) - 5} more"
+
+            prompt = (
+                f"{ok_count} subtitle(s) saved successfully.\n"
+                f"{len(failed)} failed: {failed_names}\n\n"
+                f"Successful subtitles are already saved to disk — "
+                f"only the failed ones will be retried."
+            )
+            reply = QMessageBox.question(
+                self, "Retry failed files?", prompt,
+                QMessageBox.StandardButton.Retry | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Retry
+            )
+            if reply != QMessageBox.StandardButton.Retry:
+                return
+        else:
+            files = self._get_files_to_process()
+            if not files:
+                QMessageBox.warning(self, "No files", "Add some files first!")
+                return
+
+        # Reset visual state on items about to be processed
+        for i in range(self.file_list.count()):
+            item = self.file_list.item(i)
+            if item.flags() == Qt.ItemFlag.NoItemFlags:
+                continue
+            if item.data(STATUS_ROLE) != "ok":
+                item.setData(Qt.ItemDataRole.BackgroundRole, None)
+                item.setData(Qt.ItemDataRole.ForegroundRole, None)
+                item.setData(Qt.ItemDataRole.DecorationRole, None)
+                item.setData(STATUS_ROLE, None)
 
         self.start_btn.setEnabled(False)
+        self.start_btn.setText("Start")
         self.cancel_btn.setVisible(True)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
@@ -471,6 +541,13 @@ class AutoSubWindow(QMainWindow):
         self.cancel_btn.setVisible(False)
         self.progress_bar.setVisible(False)
         self.status_label.setText(msg if success else "Done with errors")
+
+        # Flip Start → Retry if any items are still marked as failed
+        if self._get_failed_files():
+            self.start_btn.setText("Retry")
+        else:
+            self.start_btn.setText("Start")
+
         if success:
             QMessageBox.information(self, "Done", msg)
         else:

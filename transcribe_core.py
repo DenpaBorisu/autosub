@@ -1252,18 +1252,23 @@ def transcribe_file(
                 pass
 
 
+SUPPORTED_EXTENSIONS = frozenset({
+    # Video
+    ".mp4", ".m4v", ".mkv", ".mov", ".avi", ".webm", ".flv", ".f4v",
+    ".wmv", ".asf", ".mpg", ".mpeg", ".vob", ".ts", ".m2ts", ".mts",
+    ".3gp", ".3g2", ".ogv", ".divx", ".rm", ".rmvb",
+    # Audio
+    ".mp3", ".mp2", ".mpga", ".wav", ".flac", ".m4a", ".aac", ".ac3",
+    ".eac3", ".ogg", ".opus", ".wma", ".aiff", ".aif", ".amr", ".mka",
+    ".au", ".dts", ".caf", ".ra",
+})
+
+
 def get_audio_files(directory: str = ".") -> List[Path]:
     """Get all audio/video files in directory."""
-    audio_extensions = {
-        ".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus",
-        ".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".wmv",
-        ".mpg", ".mpeg", ".m4v", ".3gp", ".ts", ".m2ts", ".mpga"
-    }
-
     files = []
     for path in Path(directory).iterdir():
-        if path.is_file() and path.suffix.lower() in audio_extensions:
-            if path.suffix.lower() != ".srt":
-                files.append(path)
+        if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS:
+            files.append(path)
 
     return sorted(files)
