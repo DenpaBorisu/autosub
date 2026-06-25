@@ -17,7 +17,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install PyQt6 pyqtdarktheme "nuitka[onefile]"
+        run: pip install PyQt6 pyqtdarktheme pyinstaller
 
       - name: Get version
         id: version
@@ -37,49 +37,49 @@ jobs:
       - name: Build executable
         shell: cmd
         run: >-
-          python -m nuitka --onefile --enable-plugin=pyqt6 --lto=yes --remove-output --assume-yes-for-download
-          --include-data-files=ffmpeg.exe=ffmpeg.exe
-          --include-data-files=ffprobe.exe=ffprobe.exe
-          --nofollow-import-to=PyQt6.QtNetwork
-          --nofollow-import-to=PyQt6.QtSql
-          --nofollow-import-to=PyQt6.QtTest
-          --nofollow-import-to=PyQt6.QtMultimedia
-          --nofollow-import-to=PyQt6.QtSvg
-          --nofollow-import-to=PyQt6.QtSvgWidgets
-          --nofollow-import-to=PyQt6.QtQml
-          --nofollow-import-to=PyQt6.QtQuick
-          --nofollow-import-to=PyQt6.QtQuick3D
-          --nofollow-import-to=PyQt6.QtQuickWidgets
-          --nofollow-import-to=PyQt6.QtQuickControls2
-          --nofollow-import-to=PyQt6.QtWebEngineCore
-          --nofollow-import-to=PyQt6.QtWebEngineWidgets
-          --nofollow-import-to=PyQt6.QtWebChannel
-          --nofollow-import-to=PyQt6.QtWebSockets
-          --nofollow-import-to=PyQt6.QtDesigner
-          --nofollow-import-to=PyQt6.QtPrintSupport
-          --nofollow-import-to=PyQt6.QtBluetooth
-          --nofollow-import-to=PyQt6.QtConcurrent
-          --nofollow-import-to=PyQt6.QtHelp
-          --nofollow-import-to=PyQt6.QtLocation
-          --nofollow-import-to=PyQt6.QtNfc
-          --nofollow-import-to=PyQt6.QtPositioning
-          --nofollow-import-to=PyQt6.QtSensors
-          --nofollow-import-to=PyQt6.QtSerialPort
-          --nofollow-import-to=PyQt6.QtSerialBus
-          --nofollow-import-to=PyQt6.QtTextToSpeech
-          --nofollow-import-to=PyQt6.QtXml
-          --nofollow-import-to=PyQt6.QtPdf
-          --nofollow-import-to=PyQt6.QtPdfWidgets
-          --nofollow-import-to=PyQt6.QtRemoteObjects
-          --nofollow-import-to=PyQt6.QtCharts
-          --nofollow-import-to=PyQt6.QtDataVisualization
-          --nofollow-import-to=PyQt6.QtStateMachine
-          --nofollow-import-to=PyQt6.QtShaderTools
-          --nofollow-import-to=PyQt6.QtOpenGL
-          --nofollow-import-to=PyQt6.QtOpenGLWidgets
-          --nofollow-import-to=PyQt6.QtWaylandCompositor
-          --output-dir=dist
-          --output-filename="AutoSub ${{ steps.version.outputs.version }}.exe"
+          pyinstaller --onefile --windowed
+          --collect-all qdarktheme
+          --add-binary "ffmpeg.exe;."
+          --add-binary "ffprobe.exe;."
+          --exclude-module PyQt6.QtNetwork
+          --exclude-module PyQt6.QtSql
+          --exclude-module PyQt6.QtTest
+          --exclude-module PyQt6.QtMultimedia
+          --exclude-module PyQt6.QtSvg
+          --exclude-module PyQt6.QtSvgWidgets
+          --exclude-module PyQt6.QtQml
+          --exclude-module PyQt6.QtQuick
+          --exclude-module PyQt6.QtQuick3D
+          --exclude-module PyQt6.QtQuickWidgets
+          --exclude-module PyQt6.QtQuickControls2
+          --exclude-module PyQt6.QtWebEngineCore
+          --exclude-module PyQt6.QtWebEngineWidgets
+          --exclude-module PyQt6.QtWebChannel
+          --exclude-module PyQt6.QtWebSockets
+          --exclude-module PyQt6.QtDesigner
+          --exclude-module PyQt6.QtPrintSupport
+          --exclude-module PyQt6.QtBluetooth
+          --exclude-module PyQt6.QtConcurrent
+          --exclude-module PyQt6.QtHelp
+          --exclude-module PyQt6.QtLocation
+          --exclude-module PyQt6.QtNfc
+          --exclude-module PyQt6.QtPositioning
+          --exclude-module PyQt6.QtSensors
+          --exclude-module PyQt6.QtSerialPort
+          --exclude-module PyQt6.QtSerialBus
+          --exclude-module PyQt6.QtTextToSpeech
+          --exclude-module PyQt6.QtXml
+          --exclude-module PyQt6.QtPdf
+          --exclude-module PyQt6.QtPdfWidgets
+          --exclude-module PyQt6.QtRemoteObjects
+          --exclude-module PyQt6.QtCharts
+          --exclude-module PyQt6.QtDataVisualization
+          --exclude-module PyQt6.QtStateMachine
+          --exclude-module PyQt6.QtShaderTools
+          --exclude-module PyQt6.QtOpenGL
+          --exclude-module PyQt6.QtOpenGLWidgets
+          --exclude-module PyQt6.QtWaylandCompositor
+          --name "AutoSub ${{ steps.version.outputs.version }}"
           autosub_gui.py
 
       - name: Package
