@@ -17,7 +17,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install PyQt6 pyinstaller
+        run: pip install PyQt6 pyqtdarktheme pyinstaller
 
       - name: Download ffmpeg + ffprobe
         shell: pwsh
