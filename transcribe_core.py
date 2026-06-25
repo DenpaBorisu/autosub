@@ -990,7 +990,10 @@ def validate_coverage(utterances: List[dict], expected_duration_ms: int,
             f"{_srt_timestamp(expected_duration_ms)} long"
         )
 
-    return len(warnings) == 0, warnings
+    # Gaps and end-of-audio shortfalls are advisory: they often correspond to
+    # legitimately silent regions (music, pauses, quiet interludes) rather than
+    # ASR failures. Only a total lack of utterances is fatal.
+    return True, warnings
 
 
 def _srt_timestamp(ms: int) -> str:
@@ -1046,7 +1049,14 @@ class ChunkedTranscriber:
                 utterances = _normalize_utterances(utterances)
 
                 if not utterances:
-                    raise RuntimeError("ASR returned no transcription results")
+                    # ASR legitimately returns nothing for silent audio. Treat
+                    # this as a successful 0-segment result rather than an error
+                    # so a single silent stretch can't abort the whole file.
+                    self._log(
+                        f"Chunk {i + 1}/{total}: no speech detected "
+                        f"(likely silent segment)"
+                    )
+                    return utterances
 
                 self._log(
                     f"Chunk {i + 1}/{total}: done ({len(utterances)} segments)"
@@ -1087,8 +1097,6 @@ class ChunkedTranscriber:
                     asr = self._create_asr(self.audio_path)
                     utterances = asr.transcribe()
                     utterances = _normalize_utterances(utterances)
-                    if not utterances:
-                        raise RuntimeError("ASR returned no transcription results")
                     break
                 except Exception as e:
                     last_error = e
@@ -1098,6 +1106,9 @@ class ChunkedTranscriber:
                         time.sleep(delay)
                     else:
                         return False, f"Transcription failed after {MAX_CHUNK_RETRIES} attempts: {e}", 0
+
+            if not utterances:
+                self._log("No speech detected (audio may be silent)")
 
             srt_content = utterances_to_srt(utterances)
             _write_srt_atomic(self.output_srt, srt_content)
@@ -1147,15 +1158,14 @@ class ChunkedTranscriber:
             chunk_srt = self.chunk_dir / f"chunk_{i:03d}.srt"
             chunk_failed = self.chunk_dir / f"chunk_{i:03d}.failed"
 
-            # Load from cache if a valid SRT already exists
+            # Load from cache if a valid SRT already exists. An empty SRT is a
+            # legitimate 0-segment result (silent chunk); _write_srt_atomic
+            # guarantees any existing .srt is complete, so never discard it.
             if chunk_srt.exists():
                 cached = parse_srt(chunk_srt)
-                if cached:
-                    self._log(f"Chunk {i + 1}/{len(chunks)}: already transcribed ({len(cached)} segments)")
-                    chunk_results.append((int(offset_sec * 1000), cached))
-                    continue
-                else:
-                    chunk_srt.unlink()
+                self._log(f"Chunk {i + 1}/{len(chunks)}: already transcribed ({len(cached)} segments)")
+                chunk_results.append((int(offset_sec * 1000), cached))
+                continue
 
             if chunk_failed.exists():
                 chunk_failed.unlink()
