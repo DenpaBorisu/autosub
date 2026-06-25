@@ -35,59 +35,58 @@ jobs:
           Copy-Item ffmpeg-master-latest-win64-gpl\bin\ffprobe.exe .
 
       - name: Build executable
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: >
-          pyinstaller --onefile --windowed --name "AutoSub ${VERSION}"
-          --collect-all qdarktheme
-          --add-binary "ffmpeg.exe;."
-          --add-binary "ffprobe.exe;."
-          --exclude-module PyQt6.QtNetwork
-          --exclude-module PyQt6.QtSql
-          --exclude-module PyQt6.QtTest
-          --exclude-module PyQt6.QtMultimedia
-          --exclude-module PyQt6.QtSvg
-          --exclude-module PyQt6.QtSvgWidgets
-          --exclude-module PyQt6.QtQml
-          --exclude-module PyQt6.QtQuick
-          --exclude-module PyQt6.QtQuick3D
-          --exclude-module PyQt6.QtQuickWidgets
-          --exclude-module PyQt6.QtQuickControls2
-          --exclude-module PyQt6.QtWebEngineCore
-          --exclude-module PyQt6.QtWebEngineWidgets
-          --exclude-module PyQt6.QtWebChannel
-          --exclude-module PyQt6.QtWebSockets
-          --exclude-module PyQt6.QtDesigner
-          --exclude-module PyQt6.QtPrintSupport
-          --exclude-module PyQt6.QtBluetooth
-          --exclude-module PyQt6.QtConcurrent
-          --exclude-module PyQt6.QtHelp
-          --exclude-module PyQt6.QtLocation
-          --exclude-module PyQt6.QtNfc
-          --exclude-module PyQt6.QtPositioning
-          --exclude-module PyQt6.QtSensors
-          --exclude-module PyQt6.QtSerialPort
-          --exclude-module PyQt6.QtSerialBus
-          --exclude-module PyQt6.QtTextToSpeech
-          --exclude-module PyQt6.QtXml
-          --exclude-module PyQt6.QtPdf
-          --exclude-module PyQt6.QtPdfWidgets
-          --exclude-module PyQt6.QtRemoteObjects
-          --exclude-module PyQt6.QtCharts
-          --exclude-module PyQt6.QtDataVisualization
-          --exclude-module PyQt6.QtStateMachine
-          --exclude-module PyQt6.QtShaderTools
-          --exclude-module PyQt6.QtOpenGL
-          --exclude-module PyQt6.QtOpenGLWidgets
-          --exclude-module PyQt6.QtWaylandCompositor
-          autosub_gui.py
-
-      - name: Package
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
         shell: pwsh
         run: |
-          Compress-Archive -Path "dist\AutoSub ${VERSION}.exe" -DestinationPath "AutoSub-${VERSION}-windows.zip"
+          $v = "${{ steps.version.outputs.version }}"
+          pyinstaller --onefile --windowed --name "AutoSub $v" `
+            --collect-all qdarktheme `
+            --add-binary "ffmpeg.exe;." `
+            --add-binary "ffprobe.exe;." `
+            --exclude-module PyQt6.QtNetwork `
+            --exclude-module PyQt6.QtSql `
+            --exclude-module PyQt6.QtTest `
+            --exclude-module PyQt6.QtMultimedia `
+            --exclude-module PyQt6.QtSvg `
+            --exclude-module PyQt6.QtSvgWidgets `
+            --exclude-module PyQt6.QtQml `
+            --exclude-module PyQt6.QtQuick `
+            --exclude-module PyQt6.QtQuick3D `
+            --exclude-module PyQt6.QtQuickWidgets `
+            --exclude-module PyQt6.QtQuickControls2 `
+            --exclude-module PyQt6.QtWebEngineCore `
+            --exclude-module PyQt6.QtWebEngineWidgets `
+            --exclude-module PyQt6.QtWebChannel `
+            --exclude-module PyQt6.QtWebSockets `
+            --exclude-module PyQt6.QtDesigner `
+            --exclude-module PyQt6.QtPrintSupport `
+            --exclude-module PyQt6.QtBluetooth `
+            --exclude-module PyQt6.QtConcurrent `
+            --exclude-module PyQt6.QtHelp `
+            --exclude-module PyQt6.QtLocation `
+            --exclude-module PyQt6.QtNfc `
+            --exclude-module PyQt6.QtPositioning `
+            --exclude-module PyQt6.QtSensors `
+            --exclude-module PyQt6.QtSerialPort `
+            --exclude-module PyQt6.QtSerialBus `
+            --exclude-module PyQt6.QtTextToSpeech `
+            --exclude-module PyQt6.QtXml `
+            --exclude-module PyQt6.QtPdf `
+            --exclude-module PyQt6.QtPdfWidgets `
+            --exclude-module PyQt6.QtRemoteObjects `
+            --exclude-module PyQt6.QtCharts `
+            --exclude-module PyQt6.QtDataVisualization `
+            --exclude-module PyQt6.QtStateMachine `
+            --exclude-module PyQt6.QtShaderTools `
+            --exclude-module PyQt6.QtOpenGL `
+            --exclude-module PyQt6.QtOpenGLWidgets `
+            --exclude-module PyQt6.QtWaylandCompositor `
+            autosub_gui.py
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $v = "${{ steps.version.outputs.version }}"
+          Compress-Archive -Path "dist\AutoSub $v.exe" -DestinationPath "AutoSub-$v-windows.zip"
 
       - uses: actions/upload-artifact@v4
         with:
