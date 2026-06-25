@@ -11,14 +11,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-import qdarktheme
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QProgressBar, QFileDialog, QMessageBox,
     QTextEdit, QListWidget, QListWidgetItem
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QColor, QIcon
+from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QColor, QIcon, QPalette
 
 from transcribe_core import transcribe_file, get_audio_files, SUPPORTED_EXTENSIONS, get_ffmpeg_path
 from config import Config
@@ -523,10 +522,36 @@ class AutoSubWindow(QMainWindow):
             QMessageBox.warning(self, "Done with errors", msg)
 
 
+def _apply_dark_theme(app: QApplication) -> None:
+    """Force dark theme using Fusion style + dark palette.
+
+    Works identically on all platforms regardless of OS theme settings.
+    """
+    app.setStyle("Fusion")
+    dark = QPalette()
+    dark.setColor(QPalette.ColorRole.Window, QColor("#1e1e2e"))
+    dark.setColor(QPalette.ColorRole.WindowText, QColor("#cdd6f4"))
+    dark.setColor(QPalette.ColorRole.Base, QColor("#181825"))
+    dark.setColor(QPalette.ColorRole.AlternateBase, QColor("#1e1e2e"))
+    dark.setColor(QPalette.ColorRole.Text, QColor("#cdd6f4"))
+    dark.setColor(QPalette.ColorRole.Button, QColor("#313244"))
+    dark.setColor(QPalette.ColorRole.ButtonText, QColor("#cdd6f4"))
+    dark.setColor(QPalette.ColorRole.BrightText, QColor("#f38ba8"))
+    dark.setColor(QPalette.ColorRole.Highlight, QColor("#89b4fa"))
+    dark.setColor(QPalette.ColorRole.HighlightedText, QColor("#11111b"))
+    dark.setColor(QPalette.ColorRole.ToolTipBase, QColor("#313244"))
+    dark.setColor(QPalette.ColorRole.ToolTipText, QColor("#cdd6f4"))
+    dark.setColor(QPalette.ColorRole.PlaceholderText, QColor("#888888"))
+    dark.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, QColor("#666666"))
+    dark.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor("#666666"))
+    dark.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor("#666666"))
+    app.setPalette(dark)
+
+
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("AutoSub")
-    qdarktheme.setup_theme("dark")
+    _apply_dark_theme(app)
 
     window = AutoSubWindow()
     window.show()

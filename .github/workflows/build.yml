@@ -17,7 +17,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install PyQt6 pyqtdarktheme pyinstaller
+        run: pip install PyQt6 pyinstaller
 
       - name: Get version
         id: version
@@ -38,7 +38,6 @@ jobs:
         shell: cmd
         run: >-
           pyinstaller --onefile --windowed
-          --collect-all qdarktheme
           --add-binary "ffmpeg.exe;."
           --add-binary "ffprobe.exe;."
           --exclude-module PyQt6.QtNetwork
