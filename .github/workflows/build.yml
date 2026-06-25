@@ -39,6 +39,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: >
           pyinstaller --onefile --windowed --name "AutoSub ${VERSION}"
+          --collect-all qdarktheme
           --add-binary "ffmpeg.exe;."
           --add-binary "ffprobe.exe;."
           --exclude-module PyQt6.QtNetwork
