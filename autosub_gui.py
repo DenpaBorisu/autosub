@@ -11,13 +11,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
+import qdarktheme
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QProgressBar, QFileDialog, QMessageBox,
     QTextEdit, QListWidget, QListWidgetItem
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QColor, QIcon, QPalette
+from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QColor, QIcon
 
 from transcribe_core import transcribe_file, get_audio_files, SUPPORTED_EXTENSIONS, get_ffmpeg_path
 from config import Config
@@ -220,7 +221,7 @@ class AutoSubWindow(QMainWindow):
 
         # Status
         self.status_label = QLabel()
-        self.status_label.setStyleSheet("color: #e0e0e0; font-size: 11px;")
+        self.status_label.setStyleSheet("font-size: 11px;")
         self.status_label.setWordWrap(True)
         main_layout.addWidget(self.status_label)
 
@@ -238,10 +239,6 @@ class AutoSubWindow(QMainWindow):
         self.log_text.setVisible(False)
         self.log_text.setStyleSheet("""
             QTextEdit {
-                background-color: palette(base);
-                border: 1px solid palette(mid);
-                border-radius: 4px;
-                color: palette(text);
                 font-family: monospace;
                 font-size: 11px;
                 padding: 4px;
@@ -254,7 +251,6 @@ class AutoSubWindow(QMainWindow):
 
     def _apply_stylesheet(self):
         self.setStyleSheet("""
-            QWidget { color: palette(text); }
             QPushButton[primary="true"] {
                 background-color: palette(highlight);
                 color: palette(highlighted-text);
@@ -268,33 +264,6 @@ class AutoSubWindow(QMainWindow):
             QPushButton[primary="true"]:disabled {
                 background-color: palette(mid);
                 color: palette(mid);
-            }
-            QListWidget {
-                background-color: palette(base);
-                border: 1px solid palette(mid);
-                border-radius: 4px;
-                color: palette(text);
-            }
-            QListWidget::item {
-                padding: 6px;
-                border-bottom: 1px solid palette(midlight);
-            }
-            QListWidget::item:selected {
-                background-color: palette(highlight);
-                color: palette(highlighted-text);
-            }
-            QListWidget::item:hover {
-                background-color: palette(midlight);
-            }
-            QProgressBar {
-                background-color: palette(base);
-                border: 1px solid palette(mid);
-                border-radius: 4px;
-                text-align: center;
-            }
-            QProgressBar::chunk {
-                background-color: palette(highlight);
-                border-radius: 3px;
             }
         """)
 
@@ -554,44 +523,10 @@ class AutoSubWindow(QMainWindow):
             QMessageBox.warning(self, "Done with errors", msg)
 
 
-def _apply_dark_palette(app: QApplication) -> None:
-    """Force a dark palette regardless of OS theme."""
-    dark = QPalette()
-    bg = QColor("#1e1e2e")
-    bg_alt = QColor("#181825")
-    text = QColor("#cdd6f4")
-    text_dim = QColor("#888")
-    mid = QColor("#313244")
-    mid_light = QColor("#45475a")
-    highlight = QColor("#89b4fa")
-    highlighted_text = QColor("#11111b")
-
-    dark.setColor(QPalette.ColorRole.Window, bg)
-    dark.setColor(QPalette.ColorRole.WindowText, text)
-    dark.setColor(QPalette.ColorRole.Base, bg_alt)
-    dark.setColor(QPalette.ColorRole.AlternateBase, bg)
-    dark.setColor(QPalette.ColorRole.Text, text)
-    dark.setColor(QPalette.ColorRole.Button, mid)
-    dark.setColor(QPalette.ColorRole.ButtonText, text)
-    dark.setColor(QPalette.ColorRole.BrightText, QColor("#f38ba8"))
-    dark.setColor(QPalette.ColorRole.Highlight, highlight)
-    dark.setColor(QPalette.ColorRole.HighlightedText, highlighted_text)
-    dark.setColor(QPalette.ColorRole.ToolTipBase, mid)
-    dark.setColor(QPalette.ColorRole.ToolTipText, text)
-    dark.setColor(QPalette.ColorRole.PlaceholderText, text_dim)
-
-    for group in (QPalette.ColorGroup.Disabled, QPalette.ColorGroup.Inactive):
-        dark.setColor(group, QPalette.ColorRole.WindowText, text_dim)
-        dark.setColor(group, QPalette.ColorRole.Text, text_dim)
-        dark.setColor(group, QPalette.ColorRole.ButtonText, text_dim)
-
-    app.setPalette(dark)
-
-
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("AutoSub")
-    _apply_dark_palette(app)
+    qdarktheme.setup_theme("dark")
 
     window = AutoSubWindow()
     window.show()
