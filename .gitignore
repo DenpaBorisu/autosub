@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+config.json
+uv.lock
+*.mp4
+*.srt
+.chunks/
