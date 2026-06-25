@@ -5,3 +5,6 @@ uv.lock
 *.mp4
 *.srt
 .chunks/
+build/
+dist/
+*.spec

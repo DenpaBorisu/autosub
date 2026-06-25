@@ -1,11 +1,20 @@
 """
 Configuration management for AutoSub.
 
-Stores settings in config.json next to the script.
+Stores settings in config.json next to the script (or next to the
+executable when frozen with PyInstaller).
 """
 import json
+import sys
 from dataclasses import dataclass, asdict
 from pathlib import Path
+
+
+def _app_dir() -> Path:
+    """Return the directory where config.json should live."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
 
 
 @dataclass
@@ -21,7 +30,7 @@ class Config:
 
     @property
     def _config_file(self) -> Path:
-        return Path(__file__).resolve().parent / "config.json"
+        return _app_dir() / "config.json"
 
     def save(self) -> None:
         with open(self._config_file, "w", encoding="utf-8") as f:
@@ -29,7 +38,7 @@ class Config:
 
     @classmethod
     def load(cls) -> "Config":
-        config_file = Path(__file__).resolve().parent / "config.json"
+        config_file = _app_dir() / "config.json"
         if not config_file.exists():
             config = cls()
             config.save()
