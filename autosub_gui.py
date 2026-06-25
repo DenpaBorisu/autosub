@@ -48,6 +48,7 @@ class TranscribeWorker(QThread):
         total = len(self.files)
         ok_count = 0
         fail_count = 0
+        failed_paths: list[Path] = []
 
         for i, file_path in enumerate(self.files):
             if not self._is_running:
@@ -74,9 +75,11 @@ class TranscribeWorker(QThread):
                     self.file_complete.emit(file_path.name, True, f"Subtitles created ({count} lines)")
                 else:
                     fail_count += 1
+                    failed_paths.append(file_path)
                     self.file_complete.emit(file_path.name, False, msg)
             except Exception as e:
                 fail_count += 1
+                failed_paths.append(file_path)
                 self.file_complete.emit(file_path.name, False, str(e))
 
             self.progress_percent.emit(i + 1, total)
@@ -85,6 +88,19 @@ class TranscribeWorker(QThread):
             self.finished.emit(False, "Cancelled")
             return
 
+        # Clean up .chunks directories ONLY for files that succeeded.
+        # Failed files keep their chunk cache so the user can re-run
+        # and resume from the chunks that were already transcribed.
+        for file_path in self.files:
+            if file_path in failed_paths:
+                continue
+            srt_path = file_path.with_suffix('.srt')
+            if self.config.output_dir:
+                srt_path = Path(self.config.output_dir) / srt_path.name
+            chunk_dir = Path(str(srt_path) + ".chunks")
+            if chunk_dir.is_dir():
+                shutil.rmtree(chunk_dir, ignore_errors=True)
+
         parts = []
         if ok_count:
             parts.append(f"{ok_count} succeeded")
@@ -92,14 +108,13 @@ class TranscribeWorker(QThread):
             parts.append(f"{fail_count} failed")
         msg = ", ".join(parts) + "." if parts else "No files processed."
 
-        # Clean up .chunks directories
-        for file_path in self.files:
-            srt_path = file_path.with_suffix('.srt')
-            if self.config.output_dir:
-                srt_path = Path(self.config.output_dir) / srt_path.name
-            chunk_dir = Path(str(srt_path) + ".chunks")
-            if chunk_dir.is_dir():
-                shutil.rmtree(chunk_dir, ignore_errors=True)
+        if failed_paths:
+            names = ", ".join(p.name for p in failed_paths[:3])
+            extra = f" Re-run to resume {len(failed_paths)} failed file(s) ({names})"
+            if len(failed_paths) > 3:
+                extra += f" and {len(failed_paths) - 3} more"
+            extra += " — completed chunks are cached."
+            msg += extra
 
         self.finished.emit(fail_count == 0, msg)
 
@@ -456,7 +471,10 @@ class AutoSubWindow(QMainWindow):
         self.cancel_btn.setVisible(False)
         self.progress_bar.setVisible(False)
         self.status_label.setText(msg if success else "Done with errors")
-        QMessageBox.information(self, "Done", msg)
+        if success:
+            QMessageBox.information(self, "Done", msg)
+        else:
+            QMessageBox.warning(self, "Done with errors", msg)
 
 
 def main():

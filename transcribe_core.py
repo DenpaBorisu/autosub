@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import json
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -22,8 +23,51 @@ from typing import Callable, Optional, List, Tuple
 
 
 # =============================================================================
-# HTTP Utilities
+# HTTP Utilities (with automatic retry on transient errors)
 # =============================================================================
+
+HTTP_RETRIES = 4
+HTTP_RETRY_BASE_DELAY = 2.0
+
+
+def _is_transient_error(e: Exception) -> bool:
+    """Return True if the exception is likely a transient network/server error."""
+    if isinstance(e, urllib.error.URLError):
+        return True
+    if isinstance(e, TimeoutError):
+        return True
+    if isinstance(e, ConnectionError):
+        return True
+    if isinstance(e, urllib.error.HTTPError):
+        return e.code >= 500 or e.code == 429
+    msg = str(e).lower()
+    if any(k in msg for k in ("timeout", "timed out")):
+        return True
+    if "connection" in msg and any(k in msg for k in ("reset", "refused", "closed", "aborted")):
+        return True
+    if "temporarily" in msg or "unavailable" in msg:
+        return True
+    return False
+
+
+def _retry(func: Callable, *args, retries: int = HTTP_RETRIES,
+           base_delay: float = HTTP_RETRY_BASE_DELAY,
+           retryable: Callable[[Exception], bool] = _is_transient_error,
+           **kwargs):
+    """Execute *func* with exponential backoff on retryable errors."""
+    last_exc: Optional[Exception] = None
+    for attempt in range(retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            last_exc = e
+            if retryable(e) and attempt < retries - 1:
+                delay = base_delay * (2 ** attempt) + random.uniform(0, 1.5)
+                time.sleep(delay)
+                continue
+            raise
+    raise last_exc  # pragma: no cover
+
 
 def http_post(url: str, data: bytes = None, json_data: dict = None,
               headers: dict = None) -> dict:
@@ -38,16 +82,18 @@ def http_post(url: str, data: bytes = None, json_data: dict = None,
     elif data:
         body = data
 
-    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    def _do():
+        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.load(resp)
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode("utf-8", errors="ignore")
+            raise RuntimeError(f"HTTP {e.code}: {error_body}") from e
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"Network error: {e.reason}") from e
 
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.load(resp)
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8", errors="ignore")
-        raise RuntimeError(f"HTTP {e.code}: {error_body}") from e
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"Network error: {e.reason}") from e
+    return _retry(_do)
 
 
 def http_put(url: str, data: bytes, headers: dict = None) -> dict:
@@ -55,13 +101,15 @@ def http_put(url: str, data: bytes, headers: dict = None) -> dict:
     if headers is None:
         headers = {}
 
-    req = urllib.request.Request(url, data=data, headers=headers, method="PUT")
+    def _do():
+        req = urllib.request.Request(url, data=data, headers=headers, method="PUT")
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return dict(resp.getheaders())
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(f"Upload failed: HTTP {e.code}") from e
 
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            return dict(resp.getheaders())
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"Upload failed: HTTP {e.code}") from e
+    return _retry(_do)
 
 
 def http_get(url: str, params: dict = None, headers: dict = None) -> dict:
@@ -69,17 +117,20 @@ def http_get(url: str, params: dict = None, headers: dict = None) -> dict:
     if headers is None:
         headers = {}
 
+    full_url = url
     if params:
         from urllib.parse import urlencode
-        url = f"{url}?{urlencode(params)}"
+        full_url = f"{url}?{urlencode(params)}"
 
-    req = urllib.request.Request(url, headers=headers, method="GET")
+    def _do():
+        req = urllib.request.Request(full_url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.load(resp)
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(f"HTTP {e.code}") from e
 
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.load(resp)
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"HTTP {e.code}") from e
+    return _retry(_do)
 
 
 def http_post_raw(url: str, data: bytes = None, json_data: dict = None,
@@ -95,19 +146,21 @@ def http_post_raw(url: str, data: bytes = None, json_data: dict = None,
     elif data:
         body = data
 
-    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    def _do():
+        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                content_type = resp.headers.get("Content-Type", "")
+                if "json" in content_type:
+                    return json.load(resp)
+                return resp.read()
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode("utf-8", errors="ignore")
+            raise RuntimeError(f"HTTP {e.code}: {error_body}") from e
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"Network error: {e.reason}") from e
 
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            content_type = resp.headers.get("Content-Type", "")
-            if "json" in content_type:
-                return json.load(resp)
-            return resp.read()
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8", errors="ignore")
-        raise RuntimeError(f"HTTP {e.code}: {error_body}") from e
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"Network error: {e.reason}") from e
+    return _retry(_do)
 
 
 def http_put_json(url: str, data: bytes, headers: dict = None) -> dict:
@@ -115,16 +168,20 @@ def http_put_json(url: str, data: bytes, headers: dict = None) -> dict:
     if headers is None:
         headers = {}
 
-    req = urllib.request.Request(url, data=data, headers=headers, method="PUT")
+    def _do():
+        req = urllib.request.Request(url, data=data, headers=headers, method="PUT")
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                content_type = resp.headers.get("Content-Type", "")
+                if "json" in content_type:
+                    return json.load(resp)
+                return {"_http_ok": resp.status == 200}
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(
+                f"Upload failed: HTTP {e.code}: {e.read().decode('utf-8', errors='ignore')}"
+            ) from e
 
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            content_type = resp.headers.get("Content-Type", "")
-            if "json" in content_type:
-                return json.load(resp)
-            return {"success": resp.status == 200}
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"Upload failed: HTTP {e.code}: {e.read().decode('utf-8', errors='ignore')}") from e
+    return _retry(_do)
 
 
 # =============================================================================
@@ -228,17 +285,33 @@ class BcutASR:
         """Poll for transcription result."""
         self._log("Transcribing (may take 1-5 minutes)...")
 
-        for i in range(500):  # Max ~8 minutes
-            resp = http_get(
-                self.API_QUERY_RESULT,
-                params={"model_id": 7, "task_id": self.task_id},
-                headers=self.HEADERS
-            )
-            task_resp = resp["data"]
+        consecutive_errors = 0
+        for i in range(600):  # Max ~10 minutes
+            try:
+                resp = http_get(
+                    self.API_QUERY_RESULT,
+                    params={"model_id": 7, "task_id": self.task_id},
+                    headers=self.HEADERS
+                )
+                consecutive_errors = 0
+            except Exception as e:
+                consecutive_errors += 1
+                if consecutive_errors >= 10:
+                    raise RuntimeError(
+                        f"ASR polling failed after {consecutive_errors} consecutive errors: {e}"
+                    ) from e
+                self._log(f"Polling error (will retry): {e}")
+                time.sleep(min(2 ** consecutive_errors, 30))
+                continue
+
+            task_resp = resp.get("data") or {}
 
             state = task_resp.get("state")
             if state == 4:  # Complete
-                return json.loads(task_resp["result"])
+                result = task_resp.get("result")
+                if result is None:
+                    raise RuntimeError("ASR completed but no result data returned")
+                return json.loads(result) if isinstance(result, str) else result
             elif state in (3, 5):  # Failed or cancelled
                 raise RuntimeError(f"ASR task failed with state: {state}")
 
@@ -433,7 +506,12 @@ class JianyingASR:
             "Content-CRC32": format(zlib.crc32(file_binary) & 0xFFFFFFFF, "08x"),
         }
         resp = http_put_json(url, data=file_binary, headers=headers)
-        if resp.get("success") != 0 and resp.get("success") is not None:
+        # ByteDance upload API convention: success=0 means OK.
+        # http_put_json synthesises {"_http_ok": True} when the response body
+        # is not JSON (HTTP status already validated at that layer), so treat
+        # both as success.  Only a numeric non-zero ``success`` is a real error.
+        success_val = resp.get("success")
+        if isinstance(success_val, int) and not isinstance(success_val, bool) and success_val != 0:
             raise RuntimeError(f"File upload failed: {resp}")
 
     def _upload_check(self) -> None:
@@ -491,8 +569,13 @@ class JianyingASR:
         headers = self._build_headers(device_time, sign)
         resp = http_post_raw(url, json_data=payload, headers=headers)
         resp_data = resp if isinstance(resp, dict) else json.loads(resp)
-        if resp_data.get("ret") != "0":
-            raise RuntimeError(f"Jianying query error: {resp_data.get('errmsg', 'Unknown')}")
+        ret = resp_data.get("ret")
+        if ret is not None and str(ret) != "0":
+            data = resp_data.get("data") or {}
+            if data.get("utterances") is None:
+                raise RuntimeError(
+                    f"Jianying query error: {resp_data.get('errmsg', 'Unknown')} (ret: {ret})"
+                )
         return resp_data
 
     def transcribe(self) -> List[dict]:
@@ -509,10 +592,23 @@ class JianyingASR:
 
         query_id = self.submit()
 
-        # Jianying processes quickly, poll every 2s for up to 5 min
+        # Jianying processes quickly, poll every 2s for up to ~10 min
         self._log("Jianying: Transcribing...")
-        for i in range(150):
-            resp_data = self.query(query_id)
+        consecutive_errors = 0
+        for i in range(300):
+            try:
+                resp_data = self.query(query_id)
+                consecutive_errors = 0
+            except Exception as e:
+                consecutive_errors += 1
+                if consecutive_errors >= 10:
+                    raise RuntimeError(
+                        f"Jianying polling failed after {consecutive_errors} errors: {e}"
+                    ) from e
+                self._log(f"Jianying: polling error (will retry): {e}")
+                time.sleep(min(2 ** consecutive_errors, 30))
+                continue
+
             utterances = resp_data.get("data", {}).get("utterances")
             if utterances is not None:
                 self._log("Jianying: Transcription complete!")
@@ -592,16 +688,18 @@ def utterances_to_srt(utterances: List[dict]) -> str:
     """Convert Bcut utterances to SRT format."""
     srt_lines = []
 
-    for i, utterance in enumerate(utterances, 1):
+    index = 0
+    for utterance in utterances:
         text = utterance.get("transcript", "").strip()
-        start_time = utterance.get("start_time", 0)
-        end_time = utterance.get("end_time", 0)
-
         if not text:
             continue
 
+        index += 1
+        start_time = utterance.get("start_time", 0)
+        end_time = utterance.get("end_time", 0)
+
         timestamp = f"{milliseconds_to_srt(int(start_time))} --> {milliseconds_to_srt(int(end_time))}"
-        srt_lines.append(f"{i}\n{timestamp}\n{text}\n")
+        srt_lines.append(f"{index}\n{timestamp}\n{text}\n")
 
     return "\n".join(srt_lines)
 
@@ -626,7 +724,7 @@ def check_ffmpeg(ffmpeg_path: str = "ffmpeg") -> bool:
 
 def extract_audio_to_mp3(input_path: str, output_path: str,
                          ffmpeg_path: str = "ffmpeg") -> bool:
-    """Extract audio from video file and convert to MP3."""
+    """Extract audio from video file and convert to MP3. Validates output."""
     try:
         subprocess.run(
             [
@@ -639,9 +737,15 @@ def extract_audio_to_mp3(input_path: str, output_path: str,
             stderr=subprocess.PIPE,
             check=True
         )
-        return True
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, FileNotFoundError):
         return False
+
+    # Verify the output is a valid, non-empty audio file
+    if not Path(output_path).exists() or Path(output_path).stat().st_size < 1024:
+        return False
+    if get_audio_duration(output_path, ffmpeg_path) <= 0:
+        return False
+    return True
 
 
 # =============================================================================
@@ -650,6 +754,8 @@ def extract_audio_to_mp3(input_path: str, output_path: str,
 
 CHUNK_DURATION_SEC = 540  # 9 minutes
 CHUNK_OVERLAP_SEC = 10
+MAX_CHUNK_RETRIES = 3
+MIN_SEGMENTS_PER_MIN = 2  # Sanity threshold: <2 segments/min likely means gaps
 
 
 def get_audio_duration(audio_path: str, ffmpeg_path: str = "ffmpeg") -> float:
@@ -668,6 +774,17 @@ def get_audio_duration(audio_path: str, ffmpeg_path: str = "ffmpeg") -> float:
         return 0
 
 
+def _validate_chunk(chunk_path: Path, expected_duration: float,
+                    ffmpeg_path: str = "ffmpeg", tolerance: float = 1.5) -> bool:
+    """Verify a chunk file is a valid audio file of approximately the expected duration."""
+    if not chunk_path.exists() or chunk_path.stat().st_size < 1024:
+        return False
+    actual = get_audio_duration(str(chunk_path), ffmpeg_path)
+    if actual <= 0:
+        return False
+    return abs(actual - expected_duration) <= tolerance
+
+
 def split_audio_ffmpeg(audio_path: str, output_dir: Path,
                        chunk_duration: int = CHUNK_DURATION_SEC,
                        overlap: int = CHUNK_OVERLAP_SEC,
@@ -675,6 +792,7 @@ def split_audio_ffmpeg(audio_path: str, output_dir: Path,
     """Split audio into overlapping chunks using ffmpeg.
 
     Returns list of (chunk_path, offset_seconds) tuples.
+    Existing chunk files are validated and re-extracted if corrupt or incomplete.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -691,7 +809,12 @@ def split_audio_ffmpeg(audio_path: str, output_dir: Path,
         actual_duration = min(chunk_duration, duration - start)
         chunk_path = output_dir / f"chunk_{idx:03d}.mp3"
 
-        if not chunk_path.exists():
+        if not _validate_chunk(chunk_path, actual_duration, ffmpeg_path):
+            if chunk_path.exists():
+                try:
+                    chunk_path.unlink()
+                except OSError:
+                    pass
             subprocess.run(
                 [ffmpeg_path, "-y", "-i", audio_path,
                  "-ss", str(start), "-t", str(actual_duration),
@@ -786,6 +909,71 @@ def merge_chunk_results(chunk_results: List[Tuple[float, List[dict]]],
     return merged
 
 
+def _write_srt_atomic(srt_path: Path, content: str) -> None:
+    """Write SRT content atomically — temp file then rename. Prevents partial files."""
+    tmp_path = srt_path.with_suffix(srt_path.suffix + ".tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        tmp_path.replace(srt_path)
+    except Exception:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+        raise
+
+
+def validate_coverage(utterances: List[dict], expected_duration_ms: int,
+                      max_gap_ms: int = 60000) -> Tuple[bool, List[str]]:
+    """Check that utterances cover the expected duration without suspicious gaps.
+
+    Returns (ok, warnings) where *ok* is True when the output looks complete and
+    *warnings* is a list of human-readable descriptions of any problems found.
+    """
+    warnings: List[str] = []
+
+    if not utterances:
+        return False, ["No utterances produced"]
+
+    sorted_u = sorted(utterances, key=lambda u: u.get("start_time", 0))
+
+    # Detect large gaps between consecutive entries
+    big_gaps = []
+    for i in range(1, len(sorted_u)):
+        gap = sorted_u[i].get("start_time", 0) - sorted_u[i - 1].get("end_time", 0)
+        if gap > max_gap_ms:
+            big_gaps.append(
+                f"Gap of {gap / 1000:.0f}s at {_srt_timestamp(sorted_u[i-1].get('end_time', 0))}"
+            )
+
+    if big_gaps:
+        warnings.extend(big_gaps[:5])
+        if len(big_gaps) > 5:
+            warnings.append(f"... and {len(big_gaps) - 5} more gaps")
+
+    # Check that the last entry reaches near the end of the audio
+    last_end = max(u.get("end_time", 0) for u in sorted_u)
+    if expected_duration_ms > 0 and last_end < expected_duration_ms * 0.7:
+        warnings.append(
+            f"Subtitles end at {_srt_timestamp(last_end)} but audio is "
+            f"{_srt_timestamp(expected_duration_ms)} long"
+        )
+
+    return len(warnings) == 0, warnings
+
+
+def _srt_timestamp(ms: int) -> str:
+    """Format milliseconds as a human-readable HH:MM:SS timestamp."""
+    seconds = ms / 1000
+    h, rem = divmod(int(seconds), 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
 class ChunkedTranscriber:
     """Split long audio, transcribe chunks, merge results with resume support."""
 
@@ -819,21 +1007,74 @@ class ChunkedTranscriber:
             return AutoASR(audio_path, self.progress_callback, self.model_id,
                            start_time=0, end_time=int(duration_ms))
 
+    def _transcribe_single_chunk(self, i: int, total: int,
+                                 chunk_path: Path, offset_sec: float) -> List[dict]:
+        """Transcribe one chunk with retry. Raises on terminal failure."""
+        last_error: Optional[Exception] = None
+
+        for attempt in range(1, MAX_CHUNK_RETRIES + 1):
+            try:
+                asr = self._create_asr(str(chunk_path))
+                utterances = asr.transcribe()
+                utterances = _normalize_utterances(utterances)
+
+                if not utterances:
+                    raise RuntimeError("ASR returned no transcription results")
+
+                self._log(
+                    f"Chunk {i + 1}/{total}: done ({len(utterances)} segments)"
+                    + (f" on attempt {attempt}" if attempt > 1 else "")
+                )
+                return utterances
+
+            except Exception as e:
+                last_error = e
+                if attempt < MAX_CHUNK_RETRIES:
+                    delay = 5 * (2 ** (attempt - 1))
+                    self._log(
+                        f"Chunk {i + 1}/{total}: attempt {attempt}/{MAX_CHUNK_RETRIES} "
+                        f"failed — {e}; retrying in {delay}s"
+                    )
+                    time.sleep(delay)
+                else:
+                    self._log(f"Chunk {i + 1}/{total}: FAILED after {MAX_CHUNK_RETRIES} attempts — {e}")
+
+        raise RuntimeError(f"Chunk {i + 1}/{total} failed: {last_error}") from last_error
+
     def transcribe(self) -> tuple[bool, str, int]:
-        """Full workflow: split, transcribe chunks, merge. Supports resume."""
-        self._log(f"Audio duration: checking...")
+        """Full workflow: split, transcribe chunks, merge. Supports resume.
+
+        ALL chunks must succeed for the result to be marked successful.
+        """
+        self._log("Audio duration: checking...")
         duration = get_audio_duration(self.audio_path, self.ffmpeg_path)
 
         # Short file — no chunking needed
         if duration <= CHUNK_DURATION_SEC:
             self._log(f"Audio is {duration:.0f}s — no chunking needed")
-            asr = self._create_asr(self.audio_path)
-            utterances = asr.transcribe()
-            utterances = _normalize_utterances(utterances)
+
+            utterances: List[dict] = []
+            last_error: Optional[Exception] = None
+            for attempt in range(1, MAX_CHUNK_RETRIES + 1):
+                try:
+                    asr = self._create_asr(self.audio_path)
+                    utterances = asr.transcribe()
+                    utterances = _normalize_utterances(utterances)
+                    if not utterances:
+                        raise RuntimeError("ASR returned no transcription results")
+                    break
+                except Exception as e:
+                    last_error = e
+                    if attempt < MAX_CHUNK_RETRIES:
+                        delay = 5 * (2 ** (attempt - 1))
+                        self._log(f"Attempt {attempt}/{MAX_CHUNK_RETRIES} failed — {e}; retrying in {delay}s")
+                        time.sleep(delay)
+                    else:
+                        return False, f"Transcription failed after {MAX_CHUNK_RETRIES} attempts: {e}", 0
+
             srt_content = utterances_to_srt(utterances)
-            with open(self.output_srt, "w", encoding="utf-8") as f:
-                f.write(srt_content)
-            return True, f"Created {self.output_srt.name}", len(utterances)
+            _write_srt_atomic(self.output_srt, srt_content)
+            return True, f"Created {self.output_srt.name} ({len(utterances)} segments)", len(utterances)
 
         self._log(f"Audio is {duration / 60:.1f} min — splitting into chunks")
 
@@ -871,51 +1112,49 @@ class ChunkedTranscriber:
             "model_id": self.model_id,
         }, indent=2))
 
-        # Transcribe each chunk
-        chunk_results = []
-        failed_chunks = []
+        # Transcribe each chunk — ALL must succeed
+        chunk_results: List[Tuple[int, List[dict]]] = []
+        failed_chunks: List[int] = []
 
         for i, (chunk_path, offset_sec) in enumerate(chunks):
             chunk_srt = self.chunk_dir / f"chunk_{i:03d}.srt"
             chunk_failed = self.chunk_dir / f"chunk_{i:03d}.failed"
 
+            # Load from cache if a valid SRT already exists
             if chunk_srt.exists():
-                # Already done — load from cache
-                self._log(f"Chunk {i + 1}/{len(chunks)}: already transcribed (skipping)")
-                utterances = parse_srt(chunk_srt)
-                chunk_results.append((int(offset_sec * 1000), utterances))
-                continue
+                cached = parse_srt(chunk_srt)
+                if cached:
+                    self._log(f"Chunk {i + 1}/{len(chunks)}: already transcribed ({len(cached)} segments)")
+                    chunk_results.append((int(offset_sec * 1000), cached))
+                    continue
+                else:
+                    chunk_srt.unlink()
 
             if chunk_failed.exists():
                 chunk_failed.unlink()
-                self._log(f"Chunk {i + 1}/{len(chunks)}: retrying previous failure")
 
-            self._log(f"Chunk {i + 1}/{len(chunks)}: transcribing ({offset_sec:.0f}s offset)...")
+            self._log(f"Chunk {i + 1}/{len(chunks)}: transcribing (offset {offset_sec:.0f}s)...")
 
             try:
-                asr = self._create_asr(str(chunk_path))
-                utterances = asr.transcribe()
-                utterances = _normalize_utterances(utterances)
-
-                if not utterances:
-                    self._log(f"Chunk {i + 1}/{len(chunks)}: no results")
-                    chunk_failed.write_text("No transcription results")
-                    failed_chunks.append(i + 1)
-                    continue
-
+                utterances = self._transcribe_single_chunk(i, len(chunks), chunk_path, offset_sec)
                 # Save chunk SRT immediately (for resume)
                 srt_content = utterances_to_srt(utterances)
-                chunk_srt.write_text(srt_content, encoding="utf-8")
+                _write_srt_atomic(chunk_srt, srt_content)
                 chunk_results.append((int(offset_sec * 1000), utterances))
-                self._log(f"Chunk {i + 1}/{len(chunks)}: done ({len(utterances)} segments)")
-
             except Exception as e:
-                self._log(f"Chunk {i + 1}/{len(chunks)}: FAILED — {e}")
                 chunk_failed.write_text(str(e))
                 failed_chunks.append(i + 1)
 
+        # STRICT: any chunk failure means the whole result is incomplete
+        if failed_chunks:
+            msg = (
+                f"{len(failed_chunks)}/{len(chunks)} chunk(s) failed (indices {failed_chunks}). "
+                f"Output NOT written. Re-run to resume from cached chunks."
+            )
+            return False, msg, 0
+
         if not chunk_results:
-            return False, f"All {len(chunks)} chunks failed", 0
+            return False, "All chunks failed", 0
 
         # Merge results
         self._log("Merging chunks...")
@@ -924,18 +1163,24 @@ class ChunkedTranscriber:
         if not merged:
             return False, "Merge produced no results", 0
 
+        # Validate coverage before declaring success
+        ok, warnings = validate_coverage(merged, int(duration * 1000))
+        if not ok:
+            detail = "; ".join(warnings)
+            self._log(f"Coverage validation FAILED: {detail}")
+            return False, f"Output incomplete — {detail}", 0
+        elif warnings:
+            for w in warnings:
+                self._log(f"Warning: {w}")
+
         srt_content = utterances_to_srt(merged)
-        with open(self.output_srt, "w", encoding="utf-8") as f:
-            f.write(srt_content)
+        _write_srt_atomic(self.output_srt, srt_content)
 
-        msg = f"Created {self.output_srt.name} ({len(merged)} segments"
-        if failed_chunks:
-            msg += f", {len(failed_chunks)} chunk(s) failed: {failed_chunks}"
-        msg += ")"
-        msg += f"\nChunks saved in {self.chunk_dir.name}/ (safe to delete)"
-
-        success = len(failed_chunks) < len(chunks)
-        return success, msg, len(merged)
+        msg = (
+            f"Created {self.output_srt.name} ({len(merged)} segments). "
+            f"Chunks saved in {self.chunk_dir.name}/ (safe to delete)"
+        )
+        return True, msg, len(merged)
 
 
 # =============================================================================
@@ -1003,7 +1248,7 @@ def transcribe_file(
         if needs_conversion and mp3_path.exists():
             try:
                 mp3_path.unlink()
-            except:
+            except OSError:
                 pass
 
 
