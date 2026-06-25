@@ -2,6 +2,7 @@
 name = "autosub"
 version = "0.1.0"
 description = "Standalone transcription utility — drag-and-drop audio/video to subtitle files"
+license = "GPL-3.0-or-later"
 requires-python = ">=3.10"
 dependencies = [
     "PyQt6",

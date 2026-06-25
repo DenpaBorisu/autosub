@@ -97,3 +97,7 @@ uv run pyinstaller --onefile --windowed --name AutoSub autosub_gui.py
 ```
 
 The executable is placed in `dist/AutoSub` for either option.
+
+## License
+
+GPL-3.0. See [LICENSE](LICENSE).
