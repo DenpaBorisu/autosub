@@ -38,8 +38,8 @@ jobs:
         shell: cmd
         run: >-
           python -m nuitka --onefile --enable-plugin=pyqt6 --lto=yes --remove-output
-          --include-data-files "ffmpeg.exe=ffmpeg.exe"
-          --include-data-files "ffprobe.exe=ffprobe.exe"
+          --include-data-files=ffmpeg.exe=ffmpeg.exe
+          --include-data-files=ffprobe.exe=ffprobe.exe
           --nofollow-import-to=PyQt6.QtNetwork
           --nofollow-import-to=PyQt6.QtSql
           --nofollow-import-to=PyQt6.QtTest
