@@ -4,6 +4,17 @@ Drag-and-drop audio/video files to generate subtitle (.srt) files. Supports
 all common media formats and handles long files by splitting into chunks
 automatically.
 
+## Download
+
+Grab the latest release for your platform:
+
+| Platform | Download | Notes |
+|----------|----------|-------|
+| **Windows** | [AutoSub-windows.zip](https://github.com/DenpaBorisu/autosub/releases/latest/download/AutoSub-windows.zip) | Extract and run `AutoSub.exe` — ffmpeg is bundled, nothing else to install |
+| **Linux** | [AutoSub-linux.zip](https://github.com/DenpaBorisu/autosub/releases/latest/download/AutoSub-linux.zip) | Extract and run `./AutoSub` — requires ffmpeg (`sudo apt install ffmpeg` or `sudo pacman -S ffmpeg`) |
+
+[All releases](https://github.com/DenpaBorisu/autosub/releases)
+
 ## Requirements
 
 - **ffmpeg/ffprobe** — must be on your system PATH
