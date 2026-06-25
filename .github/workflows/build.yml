@@ -35,56 +35,52 @@ jobs:
           Copy-Item ffmpeg-master-latest-win64-gpl\bin\ffprobe.exe .
 
       - name: Build executable
-        shell: pwsh
-        run: |
-          $v = "${{ steps.version.outputs.version }}"
-          nuitka --onefile `
-            --enable-plugin=pyqt6 `
-            --lto=yes `
-            --remove-output `
-            --include-data-files "ffmpeg.exe=ffmpeg.exe" `
-            --include-data-files "ffprobe.exe=ffprobe.exe" `
-            --nofollow-import-to=PyQt6.QtNetwork `
-            --nofollow-import-to=PyQt6.QtSql `
-            --nofollow-import-to=PyQt6.QtTest `
-            --nofollow-import-to=PyQt6.QtMultimedia `
-            --nofollow-import-to=PyQt6.QtSvg `
-            --nofollow-import-to=PyQt6.QtSvgWidgets `
-            --nofollow-import-to=PyQt6.QtQml `
-            --nofollow-import-to=PyQt6.QtQuick `
-            --nofollow-import-to=PyQt6.QtQuick3D `
-            --nofollow-import-to=PyQt6.QtQuickWidgets `
-            --nofollow-import-to=PyQt6.QtQuickControls2 `
-            --nofollow-import-to=PyQt6.QtWebEngineCore `
-            --nofollow-import-to=PyQt6.QtWebEngineWidgets `
-            --nofollow-import-to=PyQt6.QtWebChannel `
-            --nofollow-import-to=PyQt6.QtWebSockets `
-            --nofollow-import-to=PyQt6.QtDesigner `
-            --nofollow-import-to=PyQt6.QtPrintSupport `
-            --nofollow-import-to=PyQt6.QtBluetooth `
-            --nofollow-import-to=PyQt6.QtConcurrent `
-            --nofollow-import-to=PyQt6.QtHelp `
-            --nofollow-import-to=PyQt6.QtLocation `
-            --nofollow-import-to=PyQt6.QtNfc `
-            --nofollow-import-to=PyQt6.QtPositioning `
-            --nofollow-import-to=PyQt6.QtSensors `
-            --nofollow-import-to=PyQt6.QtSerialPort `
-            --nofollow-import-to=PyQt6.QtSerialBus `
-            --nofollow-import-to=PyQt6.QtTextToSpeech `
-            --nofollow-import-to=PyQt6.QtXml `
-            --nofollow-import-to=PyQt6.QtPdf `
-            --nofollow-import-to=PyQt6.QtPdfWidgets `
-            --nofollow-import-to=PyQt6.QtRemoteObjects `
-            --nofollow-import-to=PyQt6.QtCharts `
-            --nofollow-import-to=PyQt6.QtDataVisualization `
-            --nofollow-import-to=PyQt6.QtStateMachine `
-            --nofollow-import-to=PyQt6.QtShaderTools `
-            --nofollow-import-to=PyQt6.QtOpenGL `
-            --nofollow-import-to=PyQt6.QtOpenGLWidgets `
-            --nofollow-import-to=PyQt6.QtWaylandCompositor `
-            --output-dir=dist `
-            --output-filename="AutoSub $v" `
-            autosub_gui.py
+        shell: cmd
+        run: >-
+          python -m nuitka --onefile --enable-plugin=pyqt6 --lto=yes --remove-output
+          --include-data-files "ffmpeg.exe=ffmpeg.exe"
+          --include-data-files "ffprobe.exe=ffprobe.exe"
+          --nofollow-import-to=PyQt6.QtNetwork
+          --nofollow-import-to=PyQt6.QtSql
+          --nofollow-import-to=PyQt6.QtTest
+          --nofollow-import-to=PyQt6.QtMultimedia
+          --nofollow-import-to=PyQt6.QtSvg
+          --nofollow-import-to=PyQt6.QtSvgWidgets
+          --nofollow-import-to=PyQt6.QtQml
+          --nofollow-import-to=PyQt6.QtQuick
+          --nofollow-import-to=PyQt6.QtQuick3D
+          --nofollow-import-to=PyQt6.QtQuickWidgets
+          --nofollow-import-to=PyQt6.QtQuickControls2
+          --nofollow-import-to=PyQt6.QtWebEngineCore
+          --nofollow-import-to=PyQt6.QtWebEngineWidgets
+          --nofollow-import-to=PyQt6.QtWebChannel
+          --nofollow-import-to=PyQt6.QtWebSockets
+          --nofollow-import-to=PyQt6.QtDesigner
+          --nofollow-import-to=PyQt6.QtPrintSupport
+          --nofollow-import-to=PyQt6.QtBluetooth
+          --nofollow-import-to=PyQt6.QtConcurrent
+          --nofollow-import-to=PyQt6.QtHelp
+          --nofollow-import-to=PyQt6.QtLocation
+          --nofollow-import-to=PyQt6.QtNfc
+          --nofollow-import-to=PyQt6.QtPositioning
+          --nofollow-import-to=PyQt6.QtSensors
+          --nofollow-import-to=PyQt6.QtSerialPort
+          --nofollow-import-to=PyQt6.QtSerialBus
+          --nofollow-import-to=PyQt6.QtTextToSpeech
+          --nofollow-import-to=PyQt6.QtXml
+          --nofollow-import-to=PyQt6.QtPdf
+          --nofollow-import-to=PyQt6.QtPdfWidgets
+          --nofollow-import-to=PyQt6.QtRemoteObjects
+          --nofollow-import-to=PyQt6.QtCharts
+          --nofollow-import-to=PyQt6.QtDataVisualization
+          --nofollow-import-to=PyQt6.QtStateMachine
+          --nofollow-import-to=PyQt6.QtShaderTools
+          --nofollow-import-to=PyQt6.QtOpenGL
+          --nofollow-import-to=PyQt6.QtOpenGLWidgets
+          --nofollow-import-to=PyQt6.QtWaylandCompositor
+          --output-dir=dist
+          --output-filename="AutoSub ${{ steps.version.outputs.version }}.exe"
+          autosub_gui.py
 
       - name: Package
         shell: pwsh
