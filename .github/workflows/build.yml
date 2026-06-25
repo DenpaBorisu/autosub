@@ -37,7 +37,7 @@ jobs:
       - name: Build executable
         shell: cmd
         run: >-
-          python -m nuitka --onefile --enable-plugin=pyqt6 --lto=yes --remove-output
+          python -m nuitka --onefile --enable-plugin=pyqt6 --lto=yes --remove-output --assume-yes-for-download
           --include-data-files=ffmpeg.exe=ffmpeg.exe
           --include-data-files=ffprobe.exe=ffprobe.exe
           --nofollow-import-to=PyQt6.QtNetwork
