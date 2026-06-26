@@ -10,8 +10,8 @@ Grab the latest release for your platform:
 
 | Platform | Download | Notes |
 |----------|----------|-------|
-| **Windows** | [AutoSub-0.1.0-windows.zip](https://github.com/DenpaBorisu/autosub/releases/latest/download/AutoSub-0.1.0-windows.zip) | Extract and run `AutoSub 0.1.0.exe` — ffmpeg is bundled, nothing else to install |
-| **Linux** | [AutoSub-0.1.0-linux.zip](https://github.com/DenpaBorisu/autosub/releases/latest/download/AutoSub-0.1.0-linux.zip) | Extract and run `./AutoSub-0.1.0` — requires ffmpeg (`sudo apt install ffmpeg` or `sudo pacman -S ffmpeg`) |
+| **Windows** | [AutoSub-0.1.2-windows.zip](https://github.com/DenpaBorisu/autosub/releases/latest/download/AutoSub-0.1.2-windows.zip) | Extract and run `AutoSub 0.1.2.exe` — ffmpeg is bundled, nothing else to install |
+| **Linux** | [AutoSub-0.1.2-linux.zip](https://github.com/DenpaBorisu/autosub/releases/latest/download/AutoSub-0.1.2-linux.zip) | Extract and run `./AutoSub-0.1.2` — requires ffmpeg (`sudo apt install ffmpeg` or `sudo pacman -S ffmpeg`) |
 
 [All releases](https://github.com/DenpaBorisu/autosub/releases)
 
