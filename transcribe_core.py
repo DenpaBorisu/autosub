@@ -22,6 +22,20 @@ from pathlib import Path
 from typing import Callable, Optional, List, Tuple
 
 
+def _no_window_kwargs() -> dict:
+    """Return subprocess kwargs that suppress the console window on Windows.
+
+    On Windows, launching a console-subsystem binary (ffmpeg.exe, ffprobe.exe)
+    from a windowed (``--windowed`` PyInstaller) parent allocates a fresh
+    console for every child, producing a rapidly flashing command window.
+    ``CREATE_NO_WINDOW`` prevents that child console from being allocated.
+    No-op on POSIX, where subprocesses never spawn a window.
+    """
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
+
+
 # =============================================================================
 # HTTP Utilities (with automatic retry on transient errors)
 # =============================================================================
@@ -739,7 +753,8 @@ def check_ffmpeg(ffmpeg_path: str = "ffmpeg") -> bool:
             [ffmpeg_path, "-version"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            check=True
+            check=True,
+            **_no_window_kwargs()
         )
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -759,7 +774,8 @@ def extract_audio_to_mp3(input_path: str, output_path: str,
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            check=True
+            check=True,
+            **_no_window_kwargs()
         )
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
@@ -794,7 +810,8 @@ def get_audio_duration(audio_path: str, ffmpeg_path: str = "ffmpeg") -> float:
              "-show_entries", "format=duration",
              "-of", "default=noprint_wrappers=1:nokey=1",
              audio_path],
-            capture_output=True, text=True, check=True
+            capture_output=True, text=True, check=True,
+            **_no_window_kwargs()
         )
         return float(result.stdout.strip())
     except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
@@ -848,7 +865,8 @@ def split_audio_ffmpeg(audio_path: str, output_dir: Path,
                  "-acodec", "libmp3lame", "-q:a", "2",
                  "-ar", "44100", "-ac", "1",
                  str(chunk_path)],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+                **_no_window_kwargs()
             )
 
         chunks.append((chunk_path, start))
