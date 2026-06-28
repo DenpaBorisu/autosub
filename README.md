@@ -12,7 +12,7 @@ Grab the latest release for your platform:
 |----------|----------|-------|
 | **Windows** | [AutoSub-0.1.2-windows.zip](https://github.com/DenpaBorisu/autosub/releases/latest/download/AutoSub-0.1.2-windows.zip) | Extract and run `AutoSub 0.1.2.exe` — ffmpeg is bundled, nothing else to install |
 | **Linux** | [AutoSub-0.1.2-linux.zip](https://github.com/DenpaBorisu/autosub/releases/latest/download/AutoSub-0.1.2-linux.zip) | Extract and run `./AutoSub-0.1.2` — requires ffmpeg (`sudo apt install ffmpeg` or `sudo pacman -S ffmpeg`) |
-| **macOS** | [AutoSub-0.1.2-macos.zip](https://github.com/DenpaBorisu/autosub/releases/latest/download/AutoSub-0.1.2-macos.zip) | Extract and run `./AutoSub-0.1.2` — requires ffmpeg (`brew install ffmpeg`). Unsigned: on first launch right-click → Open, or run `xattr -dr com.apple.quarantine AutoSub-0.1.2` |
+| **macOS** | [AutoSub-0.1.2-macos.zip](https://github.com/DenpaBorisu/autosub/releases/latest/download/AutoSub-0.1.2-macos.zip) | Extract and run `./AutoSub-0.1.2` — ffmpeg is bundled. Ad-hoc signed: on first launch right-click → Open, or run `xattr -dr com.apple.quarantine AutoSub-0.1.2`. x86_64 build — runs natively on Intel, via Rosetta 2 on Apple Silicon |
 
 [All releases](https://github.com/DenpaBorisu/autosub/releases)
 
