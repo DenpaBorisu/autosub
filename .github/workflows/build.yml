@@ -8,6 +8,7 @@ on:
 
 jobs:
   build-windows:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: windows-latest
     permissions:
       contents: write
@@ -99,3 +100,181 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: AutoSub-${{ steps.version.outputs.version }}-windows.zip
+
+  build-linux:
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y ccache patchelf
+
+      - name: Sync Python dependencies
+        run: uv sync
+
+      - name: Get version
+        id: version
+        run: |
+          version=$(grep -E '^version = "' pyproject.toml | sed -E 's/^version = "(.*)".*/\1/')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build executable
+        run: |
+          uv run nuitka \
+            --onefile \
+            --enable-plugin=pyqt6 \
+            --remove-output \
+            --lto=yes \
+            --nofollow-import-to=PyQt6.QtNetwork \
+            --nofollow-import-to=PyQt6.QtSql \
+            --nofollow-import-to=PyQt6.QtTest \
+            --nofollow-import-to=PyQt6.QtMultimedia \
+            --nofollow-import-to=PyQt6.QtSvg \
+            --nofollow-import-to=PyQt6.QtSvgWidgets \
+            --nofollow-import-to=PyQt6.QtQml \
+            --nofollow-import-to=PyQt6.QtQuick \
+            --nofollow-import-to=PyQt6.QtQuick3D \
+            --nofollow-import-to=PyQt6.QtQuickWidgets \
+            --nofollow-import-to=PyQt6.QtQuickControls2 \
+            --nofollow-import-to=PyQt6.QtWebEngineCore \
+            --nofollow-import-to=PyQt6.QtWebEngineWidgets \
+            --nofollow-import-to=PyQt6.QtWebChannel \
+            --nofollow-import-to=PyQt6.QtWebSockets \
+            --nofollow-import-to=PyQt6.QtDesigner \
+            --nofollow-import-to=PyQt6.QtPrintSupport \
+            --nofollow-import-to=PyQt6.QtBluetooth \
+            --nofollow-import-to=PyQt6.QtConcurrent \
+            --nofollow-import-to=PyQt6.QtHelp \
+            --nofollow-import-to=PyQt6.QtLocation \
+            --nofollow-import-to=PyQt6.QtNfc \
+            --nofollow-import-to=PyQt6.QtPositioning \
+            --nofollow-import-to=PyQt6.QtSensors \
+            --nofollow-import-to=PyQt6.QtSerialPort \
+            --nofollow-import-to=PyQt6.QtSerialBus \
+            --nofollow-import-to=PyQt6.QtTextToSpeech \
+            --nofollow-import-to=PyQt6.QtXml \
+            --nofollow-import-to=PyQt6.QtPdf \
+            --nofollow-import-to=PyQt6.QtPdfWidgets \
+            --nofollow-import-to=PyQt6.QtRemoteObjects \
+            --nofollow-import-to=PyQt6.QtCharts \
+            --nofollow-import-to=PyQt6.QtDataVisualization \
+            --nofollow-import-to=PyQt6.QtStateMachine \
+            --nofollow-import-to=PyQt6.QtShaderTools \
+            --nofollow-import-to=PyQt6.QtOpenGL \
+            --nofollow-import-to=PyQt6.QtOpenGLWidgets \
+            --nofollow-import-to=PyQt6.QtWaylandCompositor \
+            --output-dir=dist \
+            --output-filename=AutoSub \
+            autosub_gui.py
+
+      - name: Package
+        run: |
+          v=${{ steps.version.outputs.version }}
+          mkdir stage
+          cp dist/AutoSub "stage/AutoSub-$v"
+          chmod +x "stage/AutoSub-$v"
+          (cd stage && zip -q "../AutoSub-$v-linux.zip" "AutoSub-$v")
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutoSub-${{ steps.version.outputs.version }}-linux
+          path: AutoSub-${{ steps.version.outputs.version }}-linux.zip
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: AutoSub-${{ steps.version.outputs.version }}-linux.zip
+
+  build-macos:
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Sync Python dependencies
+        run: uv sync
+
+      - name: Get version
+        id: version
+        run: |
+          version=$(grep -E '^version = "' pyproject.toml | sed -E 's/^version = "(.*)".*/\1/')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build executable
+        run: |
+          uv run nuitka \
+            --onefile \
+            --enable-plugin=pyqt6 \
+            --remove-output \
+            --lto=yes \
+            --nofollow-import-to=PyQt6.QtNetwork \
+            --nofollow-import-to=PyQt6.QtSql \
+            --nofollow-import-to=PyQt6.QtTest \
+            --nofollow-import-to=PyQt6.QtMultimedia \
+            --nofollow-import-to=PyQt6.QtSvg \
+            --nofollow-import-to=PyQt6.QtSvgWidgets \
+            --nofollow-import-to=PyQt6.QtQml \
+            --nofollow-import-to=PyQt6.QtQuick \
+            --nofollow-import-to=PyQt6.QtQuick3D \
+            --nofollow-import-to=PyQt6.QtQuickWidgets \
+            --nofollow-import-to=PyQt6.QtQuickControls2 \
+            --nofollow-import-to=PyQt6.QtWebEngineCore \
+            --nofollow-import-to=PyQt6.QtWebEngineWidgets \
+            --nofollow-import-to=PyQt6.QtWebChannel \
+            --nofollow-import-to=PyQt6.QtWebSockets \
+            --nofollow-import-to=PyQt6.QtDesigner \
+            --nofollow-import-to=PyQt6.QtPrintSupport \
+            --nofollow-import-to=PyQt6.QtBluetooth \
+            --nofollow-import-to=PyQt6.QtConcurrent \
+            --nofollow-import-to=PyQt6.QtHelp \
+            --nofollow-import-to=PyQt6.QtLocation \
+            --nofollow-import-to=PyQt6.QtNfc \
+            --nofollow-import-to=PyQt6.QtPositioning \
+            --nofollow-import-to=PyQt6.QtSensors \
+            --nofollow-import-to=PyQt6.QtSerialPort \
+            --nofollow-import-to=PyQt6.QtSerialBus \
+            --nofollow-import-to=PyQt6.QtTextToSpeech \
+            --nofollow-import-to=PyQt6.QtXml \
+            --nofollow-import-to=PyQt6.QtPdf \
+            --nofollow-import-to=PyQt6.QtPdfWidgets \
+            --nofollow-import-to=PyQt6.QtRemoteObjects \
+            --nofollow-import-to=PyQt6.QtCharts \
+            --nofollow-import-to=PyQt6.QtDataVisualization \
+            --nofollow-import-to=PyQt6.QtStateMachine \
+            --nofollow-import-to=PyQt6.QtShaderTools \
+            --nofollow-import-to=PyQt6.QtOpenGL \
+            --nofollow-import-to=PyQt6.QtOpenGLWidgets \
+            --output-dir=dist \
+            --output-filename=AutoSub \
+            autosub_gui.py
+
+      - name: Package
+        run: |
+          v=${{ steps.version.outputs.version }}
+          mkdir stage
+          cp dist/AutoSub "stage/AutoSub-$v"
+          chmod +x "stage/AutoSub-$v"
+          (cd stage && zip -q "../AutoSub-$v-macos.zip" "AutoSub-$v")
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutoSub-${{ steps.version.outputs.version }}-macos
+          path: AutoSub-${{ steps.version.outputs.version }}-macos.zip
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: AutoSub-${{ steps.version.outputs.version }}-macos.zip
