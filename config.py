@@ -23,6 +23,9 @@ class Config:
     output_dir: str = ""
     overwrite_srt: bool = False
 
+    # Audio preprocessing
+    normalize_audio: bool = True
+
     # Window state
     window_width: int = 700
     window_height: int = 480

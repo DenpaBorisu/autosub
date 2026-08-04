@@ -14,7 +14,7 @@ from typing import List, Optional
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QProgressBar, QFileDialog, QMessageBox,
-    QTextEdit, QListWidget, QListWidgetItem
+    QTextEdit, QListWidget, QListWidgetItem, QCheckBox
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QColor, QIcon, QPalette
@@ -33,10 +33,12 @@ class TranscribeWorker(QThread):
     file_complete = pyqtSignal(str, bool, str)
     finished = pyqtSignal(bool, str)
 
-    def __init__(self, files: List[Path], config: Config):
+    def __init__(self, files: List[Path], config: Config,
+                 normalize_audio: bool = True):
         super().__init__()
         self.files = files
         self.config = config
+        self.normalize_audio = normalize_audio
         self._is_running = True
 
     def stop(self):
@@ -67,6 +69,7 @@ class TranscribeWorker(QThread):
                     ffmpeg_path=get_ffmpeg_path(),
                     model_id="8",
                     engine="auto",
+                    normalize_audio=self.normalize_audio,
                 )
                 if success:
                     ok_count += 1
@@ -196,6 +199,13 @@ class AutoSubWindow(QMainWindow):
         btns.addStretch()
         btns.addWidget(self.clear_btn)
         main_layout.addLayout(btns)
+
+        # Options
+        self.normalize_check = QCheckBox(
+            "Normalize audio (fixes quiet/silent regions)")
+        self.normalize_check.setChecked(self.config.normalize_audio)
+        self.normalize_check.setStyleSheet("font-size: 11px;")
+        main_layout.addWidget(self.normalize_check)
 
         # Start / Cancel
         self.start_btn = QPushButton("Start")
@@ -432,7 +442,11 @@ class AutoSubWindow(QMainWindow):
         self._current_status_msg = f"Processing {len(files)} file(s)..."
         self.status_label.setText(self._current_status_msg)
 
-        self.worker = TranscribeWorker(files, self.config)
+        self.worker = TranscribeWorker(
+            files, self.config, normalize_audio=self.normalize_check.isChecked())
+        # Persist the checkbox state so it survives restarts
+        self.config.normalize_audio = self.normalize_check.isChecked()
+        self.config.save()
         self.worker.progress.connect(self._on_progress)
         self.worker.progress_percent.connect(self._update_progress)
         self.worker.file_complete.connect(self._on_file_complete)
