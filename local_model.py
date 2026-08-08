@@ -1,10 +1,11 @@
 """
 Local sherpa-onnx model management.
 
-Downloads and verifies the sherpa-onnx keyword-spotting Zipformer model
-(sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20) into a ``models/`` subfolder
-next to the script (or executable when frozen). The model is used by the
-local (fully offline) ASR engine.
+Downloads and verifies the sherpa-onnx bilingual Chinese + English streaming
+ASR Zipformer model (sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-
+2023-02-16) into a ``models/`` subfolder next to the script (or executable
+when frozen). The model is used by the local (fully offline) ASR engine and
+outputs Chinese characters and English words.
 """
 import shutil
 import sys
@@ -14,17 +15,17 @@ import urllib.request
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
-# Chinese + English streaming Zipformer (transducer) — also usable as a general
-# ASR recognizer via OnlineRecognizer.from_transducer. ~32 MB tarball.
-MODEL_NAME = "sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20"
+# Chinese + English streaming Zipformer transducer ASR model. Outputs real
+# Chinese characters (not pinyin) and English text. ~40-50 MB tarball.
+MODEL_NAME = "sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16"
 MODEL_URL = (
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/"
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
     f"{MODEL_NAME}.tar.bz2"
 )
 
-ENCODER_CHUNK = "encoder-epoch-13-avg-2-chunk-16-left-64"
-DECODER_CHUNK = "decoder-epoch-13-avg-2-chunk-16-left-64"
-JOINER_CHUNK = "joiner-epoch-13-avg-2-chunk-16-left-64"
+ENCODER_CHUNK = "encoder-epoch-99-avg-1"
+DECODER_CHUNK = "decoder-epoch-99-avg-1"
+JOINER_CHUNK = "joiner-epoch-99-avg-1"
 
 # Files that must exist after extraction. Prefer quantized (int8) encoder/joiner,
 # keep fp32 decoder (quantization does not help it much).

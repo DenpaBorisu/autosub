@@ -663,7 +663,12 @@ def _get_sherpa_recognizer():
 
 
 def _local_split_utterances(tokens: List[str], timestamps: List[float]) -> List[dict]:
-    """Group phone tokens into subtitle lines with start/end times (ms)."""
+    """Group ASR tokens into subtitle lines with start/end times (ms).
+
+    The bilingual model emits Chinese character tokens plus English BPE pieces
+    where a leading '▁' (U+2581) marks a word boundary (becomes a space).
+    Special tokens like <blk>/<sos/eos>/<unk> are dropped.
+    """
     utterances: List[dict] = []
     buf: List[str] = []
     buf_len = 0
@@ -687,6 +692,8 @@ def _local_split_utterances(tokens: List[str], timestamps: List[float]) -> List[
     for i, tok in enumerate(tokens):
         if tok.startswith("<"):  # skip <blk>, <sos/eos>, <unk>
             continue
+        if tok.startswith("▁"):  # English word-start marker -> space
+            tok = " " + tok[1:]
         if buf_start is None:
             buf_start = i
         buf.append(tok)
@@ -701,9 +708,9 @@ def _local_split_utterances(tokens: List[str], timestamps: List[float]) -> List[
 class SherpaLocalASR:
     """Local sherpa-onnx transcription — fully offline, Chinese + English.
 
-    Loads the sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20 transducer as a
-    generic OnlineRecognizer. Note: the model is phone-token based, so Chinese
-    speech is transcribed as pinyin (romanized) rather than Chinese characters.
+    Uses the sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16
+    streaming transducer ASR model via OnlineRecognizer. Outputs real Chinese
+    characters and English words (not pinyin/phones).
     """
 
     def __init__(self, audio_path: str, progress_callback: Optional[Callable[[str], None]] = None,
