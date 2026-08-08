@@ -14,12 +14,13 @@ from typing import List, Optional
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QProgressBar, QFileDialog, QMessageBox,
-    QTextEdit, QListWidget, QListWidgetItem, QCheckBox
+    QTextEdit, QListWidget, QListWidgetItem, QCheckBox, QComboBox
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QColor, QIcon, QPalette
 
 from transcribe_core import transcribe_file, get_audio_files, SUPPORTED_EXTENSIONS, get_ffmpeg_path
+from local_model import is_model_downloaded, model_status, download_model
 from config import Config
 
 MEDIA_EXTENSIONS = SUPPORTED_EXTENSIONS
@@ -34,11 +35,12 @@ class TranscribeWorker(QThread):
     finished = pyqtSignal(bool, str)
 
     def __init__(self, files: List[Path], config: Config,
-                 normalize_audio: bool = True):
+                 normalize_audio: bool = True, engine: str = "auto"):
         super().__init__()
         self.files = files
         self.config = config
         self.normalize_audio = normalize_audio
+        self.engine = engine
         self._is_running = True
 
     def stop(self):
@@ -68,7 +70,7 @@ class TranscribeWorker(QThread):
                     progress_callback=lambda m: self.progress.emit(m),
                     ffmpeg_path=get_ffmpeg_path(),
                     model_id="8",
-                    engine="auto",
+                    engine=self.engine,
                     normalize_audio=self.normalize_audio,
                 )
                 if success:
@@ -118,6 +120,29 @@ class TranscribeWorker(QThread):
             msg += extra
 
         self.finished.emit(fail_count == 0, msg)
+
+
+class ModelDownloadWorker(QThread):
+    """Downloads and extracts the local sherpa-onnx model in a background thread."""
+    progress = pyqtSignal(int, int)
+    finished_dl = pyqtSignal(bool, str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        try:
+            download_model(
+                progress_cb=lambda done, total: self.progress.emit(done, total),
+                should_cancel=lambda: self._cancelled,
+            )
+            self.finished_dl.emit(True, "Model ready")
+        except Exception as e:
+            self.finished_dl.emit(False, str(e))
 
 
 class DropListWidget(QListWidget):
@@ -207,6 +232,34 @@ class AutoSubWindow(QMainWindow):
         self.normalize_check.setStyleSheet("font-size: 11px;")
         main_layout.addWidget(self.normalize_check)
 
+        # Engine selection
+        engine_row = QHBoxLayout()
+        engine_label = QLabel("Engine:")
+        engine_label.setStyleSheet("font-size: 11px;")
+        self.engine_combo = QComboBox()
+        self.engine_combo.addItem("Bcut/Jianying (cloud)")
+        self.engine_combo.addItem("Local Sherpa (offline)")
+        self.engine_combo.setCurrentIndex(0 if self.config.engine != "local" else 1)
+        self.engine_combo.setStyleSheet("font-size: 11px;")
+        self.engine_combo.currentIndexChanged.connect(self._on_engine_changed)
+        engine_row.addWidget(engine_label)
+        engine_row.addWidget(self.engine_combo)
+        engine_row.addStretch()
+        main_layout.addLayout(engine_row)
+
+        # Local model management
+        model_row = QHBoxLayout()
+        self.download_model_btn = QPushButton("Download local model")
+        self.download_model_btn.setStyleSheet("font-size: 11px; padding: 4px 10px;")
+        self.download_model_btn.clicked.connect(self._download_local_model)
+        self.model_status_label = QLabel()
+        self.model_status_label.setStyleSheet("font-size: 11px;")
+        model_row.addWidget(self.download_model_btn)
+        model_row.addWidget(self.model_status_label)
+        model_row.addStretch()
+        main_layout.addLayout(model_row)
+        self._update_model_status()
+
         # Start / Cancel
         self.start_btn = QPushButton("Start")
         self.start_btn.setFixedHeight(42)
@@ -286,6 +339,10 @@ class AutoSubWindow(QMainWindow):
         self.config.window_height = self.height()
         self.config.window_maximized = self.isMaximized()
         self.config.save()
+        dw = getattr(self, 'download_worker', None)
+        if dw is not None and dw.isRunning():
+            dw.cancel()
+            dw.wait(5000)
         super().closeEvent(event)
 
     def _is_media_file(self, path: Path) -> bool:
@@ -385,6 +442,45 @@ class AutoSubWindow(QMainWindow):
                 failed.append((i, Path(item.data(Qt.ItemDataRole.UserRole)).name))
         return failed
 
+    def _on_engine_changed(self, index):
+        self.config.engine = "local" if index == 1 else "auto"
+        self.config.save()
+        self._update_model_status()
+
+    def _update_model_status(self):
+        local_selected = self.engine_combo.currentIndex() == 1
+        status = model_status()
+        self.model_status_label.setText(status)
+        if local_selected and not is_model_downloaded():
+            self.model_status_label.setStyleSheet("color: #f38ba8; font-size: 11px;")
+        else:
+            self.model_status_label.setStyleSheet("font-size: 11px;")
+
+    def _download_local_model(self):
+        if getattr(self, 'download_worker', None) is not None and self.download_worker.isRunning():
+            return
+        self.download_model_btn.setEnabled(False)
+        self.download_model_btn.setText("Downloading...")
+        self.model_status_label.setText("Downloading local model...")
+        self.download_worker = ModelDownloadWorker(self)
+        self.download_worker.progress.connect(self._on_model_download_progress)
+        self.download_worker.finished_dl.connect(self._on_model_download_done)
+        self.download_worker.start()
+
+    def _on_model_download_progress(self, done, total):
+        pct = int(100 * done / total) if total else 0
+        self.model_status_label.setText(f"Downloading... {pct}% ({done / 1e6:.1f} MB)")
+
+    def _on_model_download_done(self, success, msg):
+        self.download_model_btn.setEnabled(True)
+        self.download_model_btn.setText("Download local model")
+        if success:
+            self.model_status_label.setText(msg)
+        else:
+            self.model_status_label.setText(f"Download failed: {msg}")
+            QMessageBox.warning(self, "Download failed", msg)
+        self._update_model_status()
+
     def _start_processing(self):
         is_retry = self.start_btn.text() == "Retry"
 
@@ -422,6 +518,17 @@ class AutoSubWindow(QMainWindow):
                 QMessageBox.warning(self, "No files", "Add some files first!")
                 return
 
+        if self.engine_combo.currentIndex() == 1 and not is_model_downloaded():
+            reply = QMessageBox.question(
+                self, "Local model required",
+                "The Local Sherpa engine needs its model file, which is not "
+                "downloaded yet.\n\nDownload it now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes)
+            if reply == QMessageBox.StandardButton.Yes:
+                self._download_local_model()
+            return
+
         # Reset visual state on items about to be processed
         for i in range(self.file_list.count()):
             item = self.file_list.item(i)
@@ -443,7 +550,8 @@ class AutoSubWindow(QMainWindow):
         self.status_label.setText(self._current_status_msg)
 
         self.worker = TranscribeWorker(
-            files, self.config, normalize_audio=self.normalize_check.isChecked())
+            files, self.config, normalize_audio=self.normalize_check.isChecked(),
+            engine=self.config.engine)
         # Persist the checkbox state so it survives restarts
         self.config.normalize_audio = self.normalize_check.isChecked()
         self.config.save()

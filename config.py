@@ -26,6 +26,9 @@ class Config:
     # Audio preprocessing
     normalize_audio: bool = True
 
+    # ASR engine: "auto" (Bcut with Jianying fallback) or "local" (sherpa-onnx)
+    engine: str = "auto"
+
     # Window state
     window_width: int = 700
     window_height: int = 480

@@ -13,6 +13,7 @@ import random
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 import urllib.error
@@ -539,24 +540,6 @@ class JianyingASR:
         }
         http_post_raw(url, data=f"1:{crc}".encode("utf-8"), headers=headers)
 
-    def _upload_commit(self) -> str:
-        url = (
-            f"https://{self.upload_hosts}/{self.store_uri}"
-            f"?uploadID={self.upload_id}&partNumber=1&x-amz-security-token={self.session_token}"
-        )
-        file_binary = self._load_audio()
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Authorization": self.auth,
-        }
-        req = urllib.request.Request(url, data=file_binary, headers=headers, method="PUT")
-        try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                pass
-        except urllib.error.HTTPError as e:
-            raise RuntimeError(f"Upload commit failed: HTTP {e.code}") from e
-        return self.store_uri
-
     def submit(self) -> str:
         url = "https://lv-pc-api-sinfonlinec.ulikecam.com/lv/v1/audio_subtitle/submit"
         payload = {
@@ -601,7 +584,6 @@ class JianyingASR:
         self._log("Jianying: Uploading audio...")
         self._upload_file()
         self._upload_check()
-        self._upload_commit()
         self._log("Jianying: Upload complete!")
 
         query_id = self.submit()
@@ -632,6 +614,143 @@ class JianyingASR:
             time.sleep(2)
 
         raise RuntimeError("Jianying transcription timeout")
+
+
+# =============================================================================
+# Sherpa-ONNX Local ASR Implementation
+# =============================================================================
+
+_local_recognizer = None
+_local_recognizer_lock = threading.Lock()
+
+_LOCAL_MAX_CHARS_PER_LINE = 30
+
+
+def _get_sherpa_recognizer():
+    """Build (once) and return the cached local OnlineRecognizer."""
+    global _local_recognizer
+    if _local_recognizer is not None:
+        return _local_recognizer
+    with _local_recognizer_lock:
+        if _local_recognizer is None:
+            try:
+                import sherpa_onnx
+            except ImportError as e:
+                raise RuntimeError(
+                    "sherpa-onnx is not installed. Run 'uv sync' to install it."
+                ) from e
+            try:
+                from local_model import model_paths
+                paths = model_paths()
+            except FileNotFoundError as e:
+                raise RuntimeError(
+                    "Local model not downloaded. Use the 'Download local model' "
+                    "button in the app first."
+                ) from e
+            _local_recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(
+                tokens=paths["tokens"],
+                encoder=paths["encoder"],
+                decoder=paths["decoder"],
+                joiner=paths["joiner"],
+                num_threads=2,
+                sample_rate=16000,
+                feature_dim=80,
+                decoding_method="greedy_search",
+            )
+        return _local_recognizer
+
+
+def _local_split_utterances(tokens: List[str], timestamps: List[float]) -> List[dict]:
+    """Group phone tokens into subtitle lines with start/end times (ms)."""
+    utterances: List[dict] = []
+    buf: List[str] = []
+    buf_len = 0
+    buf_start: Optional[int] = None
+
+    def flush(end_ts: float) -> None:
+        nonlocal buf, buf_len, buf_start
+        if not buf:
+            return
+        text = "".join(buf)
+        if text:
+            utterances.append({
+                "transcript": text,
+                "start_time": int(timestamps[buf_start] * 1000),
+                "end_time": int(end_ts * 1000),
+            })
+        buf = []
+        buf_len = 0
+        buf_start = None
+
+    for i, tok in enumerate(tokens):
+        if tok.startswith("<"):  # skip <blk>, <sos/eos>, <unk>
+            continue
+        if buf_start is None:
+            buf_start = i
+        buf.append(tok)
+        buf_len += len(tok)
+        if buf_len >= _LOCAL_MAX_CHARS_PER_LINE:
+            flush(timestamps[i])
+    if buf:
+        flush(timestamps[-1] + 0.3)
+    return utterances
+
+
+class SherpaLocalASR:
+    """Local sherpa-onnx transcription — fully offline, Chinese + English.
+
+    Loads the sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20 transducer as a
+    generic OnlineRecognizer. Note: the model is phone-token based, so Chinese
+    speech is transcribed as pinyin (romanized) rather than Chinese characters.
+    """
+
+    def __init__(self, audio_path: str, progress_callback: Optional[Callable[[str], None]] = None,
+                 ffmpeg_path: str = "ffmpeg", num_threads: int = 2):
+        self.audio_path = audio_path
+        self.progress_callback = progress_callback
+        self.ffmpeg_path = ffmpeg_path
+        self.num_threads = num_threads
+
+    def _log(self, message: str) -> None:
+        if self.progress_callback:
+            self.progress_callback(message)
+
+    def _load_audio(self):
+        """Decode audio to 16 kHz mono float32 samples via ffmpeg."""
+        cmd = [
+            self.ffmpeg_path, "-v", "error", "-i", self.audio_path,
+            "-ac", "1", "-ar", "16000", "-f", "f32le", "-",
+        ]
+        try:
+            result = subprocess.run(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                check=True, **_no_window_kwargs()
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            raise RuntimeError(f"Local: failed to decode audio: {e}") from e
+        try:
+            import numpy as np
+        except ImportError as e:
+            raise RuntimeError("Local engine requires numpy (run 'uv sync')") from e
+        return np.frombuffer(result.stdout, dtype=np.float32), 16000
+
+    def transcribe(self) -> List[dict]:
+        """Transcribe the audio file offline. Returns list of utterances."""
+        self._log("Local: Transcribing offline...")
+        recognizer = _get_sherpa_recognizer()
+        samples, sample_rate = self._load_audio()
+
+        stream = recognizer.create_stream()
+        stream.accept_waveform(sample_rate, samples)
+        stream.input_finished()
+        while recognizer.is_ready(stream):
+            recognizer.decode_stream(stream)
+
+        tokens = recognizer.tokens(stream)
+        timestamps = recognizer.timestamps(stream)
+        utterances = _local_split_utterances(tokens, timestamps)
+        self._log(f"Local: done ({len(utterances)} segments)")
+        return utterances
 
 
 # =============================================================================
@@ -1098,6 +1217,8 @@ class ChunkedTranscriber:
             duration_ms = get_audio_duration(audio_path, self.ffmpeg_path) * 1000
             return JianyingASR(audio_path, self.progress_callback,
                                start_time=0, end_time=int(duration_ms))
+        elif self.engine == "local":
+            return SherpaLocalASR(audio_path, self.progress_callback, self.ffmpeg_path)
         else:  # "auto"
             duration_ms = get_audio_duration(audio_path, self.ffmpeg_path) * 1000
             return AutoASR(audio_path, self.progress_callback, self.model_id,
