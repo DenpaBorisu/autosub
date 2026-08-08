@@ -10,6 +10,7 @@ import hmac
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -19,6 +20,7 @@ import urllib.request
 import urllib.error
 import uuid
 import zlib
+from enum import IntEnum
 from pathlib import Path
 from typing import Callable, Optional, List, Tuple
 
@@ -907,20 +909,67 @@ def extract_audio_to_mp3(input_path: str, output_path: str,
     return True
 
 
+def analyze_loudness(audio_path: str,
+                     ffmpeg_path: str = "ffmpeg") -> Tuple[Optional[float], Optional[float]]:
+    """Measure integrated loudness (LUFS) and loudness range (LU) via ebur128.
+
+    Single cheap analysis pass (no audio output). Returns (integrated_lufs,
+    lra) or (None, None) if measurement fails.
+    """
+    try:
+        result = subprocess.run(
+            [ffmpeg_path, "-v", "info", "-i", audio_path,
+             "-af", "ebur128=peak=true", "-f", "null", "-"],
+            capture_output=True, text=True, check=True,
+            **_no_window_kwargs()
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None, None
+
+    integrated: Optional[float] = None
+    lra: Optional[float] = None
+    for line in (result.stderr or "").splitlines():
+        m = re.search(r"\bI:\s+(-?[\d.]+)\s+LUFS", line)
+        if m:
+            integrated = float(m.group(1))
+        m = re.search(r"\bLRA:\s+([\d.]+)\s+LU", line)
+        if m:
+            lra = float(m.group(1))
+    return integrated, lra
+
+
+class NormalizeStatus(IntEnum):
+    """Result of the audio normalization step."""
+    NORMALIZED = 0  # a normalized output file was written
+    SKIPPED = 1     # already well-leveled — no output file produced
+    FAILED = 2
+
+
 def normalize_audio_loudness(input_path: str, output_path: str,
-                             ffmpeg_path: str = "ffmpeg") -> bool:
+                             ffmpeg_path: str = "ffmpeg") -> NormalizeStatus:
     """Normalize audio loudness before upload so quiet-but-audible regions are
     not misclassified as silence by the ASR's voice-activity detector.
 
-    Single-pass loudnorm to -16 LUFS with a highpass to remove sub-bass rumble.
-    Returns True on success (validated output), False on any failure — never
-    raises, so callers can fall back to the un-normalized source.
+    Two-step strategy (much faster than a full loudnorm pass):
+      1. Measure integrated loudness + range with ebur128 (cheap scan).
+      2. If already well-leveled, skip entirely (SKIPPED — no output written).
+         Otherwise apply a single-pass dynaudnorm (dynamic compression) plus a
+         highpass to strip sub-bass rumble.
+
+    Never raises; FAILED lets the caller fall back to the un-normalized source.
     """
+    integrated, lra = analyze_loudness(input_path, ffmpeg_path)
+    if integrated is not None:
+        if (WELL_LEVELED_MIN_LUFS <= integrated <= WELL_LEVELED_MAX_LUFS
+                and (lra is None or lra <= WELL_LEVELED_MAX_LRA)):
+            return NormalizeStatus.SKIPPED
+
+    # Fall back to a cheap single-pass compressor even if measurement failed.
     try:
         subprocess.run(
             [
                 ffmpeg_path, "-y", "-i", input_path,
-                "-vn", "-af", LOUDNORM_FILTER,
+                "-vn", "-af", NORMALIZE_FILTER,
                 "-acodec", "libmp3lame", "-q:a", "2",
                 "-ar", "44100", "-ac", "1",
                 output_path
@@ -931,13 +980,13 @@ def normalize_audio_loudness(input_path: str, output_path: str,
             **_no_window_kwargs()
         )
     except (subprocess.CalledProcessError, FileNotFoundError):
-        return False
+        return NormalizeStatus.FAILED
 
     if not Path(output_path).exists() or Path(output_path).stat().st_size < 1024:
-        return False
+        return NormalizeStatus.FAILED
     if get_audio_duration(output_path, ffmpeg_path) <= 0:
-        return False
-    return True
+        return NormalizeStatus.FAILED
+    return NormalizeStatus.NORMALIZED
 
 
 # =============================================================================
@@ -952,14 +1001,18 @@ MIN_SEGMENTS_PER_MIN = 2  # Sanity threshold: <2 segments/min likely means gaps
 # Bumped when chunk-processing behavior changes (e.g. added normalization). A
 # stale cache from an older version is discarded so the new behavior actually
 # takes effect instead of reusing old chunk SRTs.
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 
-# Loudness normalization filter applied to extracted audio before upload.
-# highpass strips sub-bass rumble that inflates the noise floor and confuses
-# the ASR's voice-activity detector; loudnorm lifts the file to podcast level
-# (-16 LUFS) and tames large dynamic range so quiet-but-audible regions are no
-# longer misclassified as silence.
-LOUDNORM_FILTER = "highpass=f=80,loudnorm=I=-16:TP=-1.5:LRA=11"
+# Loudness targets used by the measure-then-decide normalizer. highpass strips
+# sub-bass rumble that inflates the noise floor and confuses the ASR's
+# voice-activity detector; dynaudnorm dynamically lifts quiet-but-audible
+# regions (single-pass, ~5x faster than loudnorm). Files already within the
+# well-leveled range are skipped entirely — no expensive re-encode.
+LOUDNESS_TARGET_LUFS = -16
+WELL_LEVELED_MIN_LUFS = -19
+WELL_LEVELED_MAX_LUFS = -13
+WELL_LEVELED_MAX_LRA = 12
+NORMALIZE_FILTER = "highpass=f=80,dynaudnorm"
 
 
 def get_audio_duration(audio_path: str, ffmpeg_path: str = "ffmpeg") -> float:
@@ -1436,10 +1489,10 @@ def transcribe_file(
         progress_callback: Optional callback for progress updates
         ffmpeg_path: Path to ffmpeg executable
         model_id: Bcut model ID
-        engine: ASR engine — "bcut", "jianying", or "auto" (default)
+        engine: ASR engine — "bcut", "jianying", "local", or "auto" (default)
         normalize_audio: Apply loudness normalization before upload (default True).
             Helps the ASR hear quiet-but-audible regions instead of misclassifying
-            them as silence.
+            them as silence. Already well-leveled files are skipped automatically.
 
     Returns:
         Tuple of (success: bool, message: str, segment_count: int)
@@ -1468,10 +1521,17 @@ def transcribe_file(
     normalized_path: Optional[Path] = None
     if normalize_audio:
         if progress_callback:
-            progress_callback(f"Normalizing audio for {file_path.name}...")
+            progress_callback(f"Measuring audio loudness for {file_path.name}...")
         norm_tmp = mp3_path.with_suffix(mp3_path.suffix + ".norm.mp3")
-        if normalize_audio_loudness(str(mp3_path), str(norm_tmp), ffmpeg_path):
+        status = normalize_audio_loudness(str(mp3_path), str(norm_tmp), ffmpeg_path)
+        if status == NormalizeStatus.NORMALIZED:
             normalized_path = norm_tmp
+            if progress_callback:
+                progress_callback(f"Normalized audio for {file_path.name}")
+        elif status == NormalizeStatus.SKIPPED:
+            if progress_callback:
+                progress_callback(
+                    f"Audio for {file_path.name} already well-leveled — skipping normalization")
         elif progress_callback:
             progress_callback("Loudness normalization failed — using original audio")
 
