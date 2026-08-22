@@ -256,8 +256,10 @@ class AutoSubWindow(QMainWindow):
         self.parallel_check.setChecked(self.config.parallel_engines)
         self.parallel_check.setStyleSheet("font-size: 11px;")
         self.parallel_check.toggled.connect(self._on_parallel_toggled)
+        # Cloud-only option: meaningless (and silently ignored) for the
+        # local engine, so only show it when the cloud engine is selected.
+        self.parallel_check.setVisible(self.config.engine != "local")
         main_layout.addWidget(self.parallel_check)
-
         # Local model management
         model_row = QHBoxLayout()
         self.download_model_btn = QPushButton("Download local model")
@@ -269,6 +271,10 @@ class AutoSubWindow(QMainWindow):
         model_row.addWidget(self.model_status_label)
         model_row.addStretch()
         main_layout.addLayout(model_row)
+        # Model management is only relevant for the local engine.
+        local_selected = self.config.engine == "local"
+        self.download_model_btn.setVisible(local_selected)
+        self.model_status_label.setVisible(local_selected)
         self._update_model_status()
 
         # Start / Cancel
@@ -456,6 +462,12 @@ class AutoSubWindow(QMainWindow):
     def _on_engine_changed(self, index):
         self.config.engine = "local" if index == 1 else "auto"
         self.config.save()
+        # Show only the controls that make sense for the selected engine:
+        # model management for local, parallel workers for cloud.
+        local_selected = index == 1
+        self.download_model_btn.setVisible(local_selected)
+        self.model_status_label.setVisible(local_selected)
+        self.parallel_check.setVisible(not local_selected)
         self._update_model_status()
 
     def _on_parallel_toggled(self, checked):
