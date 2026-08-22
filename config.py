@@ -34,6 +34,9 @@ class Config:
     chunk_overlap_sec: int = 10
     max_chunk_retries: int = 3
 
+    # Run cloud engines concurrently on chunks (engine "auto" only)
+    parallel_engines: bool = True
+
     # Window state
     window_width: int = 700
     window_height: int = 480

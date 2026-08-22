@@ -35,12 +35,14 @@ class TranscribeWorker(QThread):
     finished = pyqtSignal(bool, str)
 
     def __init__(self, files: List[Path], config: Config,
-                 normalize_audio: bool = True, engine: str = "auto"):
+                 normalize_audio: bool = True, engine: str = "auto",
+                 parallel: bool = False):
         super().__init__()
         self.files = files
         self.config = config
         self.normalize_audio = normalize_audio
         self.engine = engine
+        self.parallel = parallel
         self._is_running = True
 
     def stop(self):
@@ -72,6 +74,7 @@ class TranscribeWorker(QThread):
                     model_id="8",
                     engine=self.engine,
                     normalize_audio=self.normalize_audio,
+                    parallel=self.parallel,
                 )
                 if success:
                     ok_count += 1
@@ -246,6 +249,14 @@ class AutoSubWindow(QMainWindow):
         engine_row.addWidget(self.engine_combo)
         engine_row.addStretch()
         main_layout.addLayout(engine_row)
+
+        # Parallel cloud engines
+        self.parallel_check = QCheckBox(
+            "Parallel cloud engines (chunks split across Bcut/JianYing/KuaiShou)")
+        self.parallel_check.setChecked(self.config.parallel_engines)
+        self.parallel_check.setStyleSheet("font-size: 11px;")
+        self.parallel_check.toggled.connect(self._on_parallel_toggled)
+        main_layout.addWidget(self.parallel_check)
 
         # Local model management
         model_row = QHBoxLayout()
@@ -447,6 +458,10 @@ class AutoSubWindow(QMainWindow):
         self.config.save()
         self._update_model_status()
 
+    def _on_parallel_toggled(self, checked):
+        self.config.parallel_engines = bool(checked)
+        self.config.save()
+
     def _update_model_status(self):
         local_selected = self.engine_combo.currentIndex() == 1
         status = model_status()
@@ -551,9 +566,12 @@ class AutoSubWindow(QMainWindow):
 
         self.worker = TranscribeWorker(
             files, self.config, normalize_audio=self.normalize_check.isChecked(),
-            engine=self.config.engine)
+            engine=self.config.engine,
+            parallel=self.parallel_check.isChecked()
+            and self.config.engine != "local")
         # Persist the checkbox state so it survives restarts
         self.config.normalize_audio = self.normalize_check.isChecked()
+        self.config.parallel_engines = self.parallel_check.isChecked()
         self.config.save()
         self.worker.progress.connect(self._on_progress)
         self.worker.progress_percent.connect(self._update_progress)

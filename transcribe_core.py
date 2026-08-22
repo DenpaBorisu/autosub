@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import json
 import os
+import queue
 import random
 import re
 import shutil
@@ -1573,18 +1574,31 @@ class ChunkedTranscriber:
                  engine: str = "auto",
                  progress_callback: Optional[Callable[[str], None]] = None,
                  ffmpeg_path: str = "ffmpeg",
-                 model_id: str = "8"):
+                 model_id: str = "8",
+                 parallel: bool = False,
+                 source_name: Optional[str] = None):
         self.audio_path = audio_path
         self.output_srt = output_srt
         self.engine = engine
         self.progress_callback = progress_callback
         self.ffmpeg_path = ffmpeg_path
         self.model_id = model_id
+        # Name of the ORIGINAL media file (audio_path may be a cached
+        # extraction whose name says nothing about the source).
+        self.source_name = source_name or Path(audio_path).name
         self.chunk_dir = Path(str(output_srt) + ".chunks")
+        # Parallel workers only make sense for the multi-engine "auto" chain;
+        # a single pinned engine gains nothing from a pool.
+        self._parallel = parallel and engine == "auto"
+        self._log_lock = threading.Lock()
 
     def _log(self, message: str) -> None:
+        # Called from engine worker threads; the GUI callback routes into a
+        # Qt signal (thread-safe emit), but serialize anyway so multi-line
+        # engine logs never interleave mid-line.
         if self.progress_callback:
-            self.progress_callback(message)
+            with self._log_lock:
+                self.progress_callback(message)
 
     def _create_asr(self, audio_path: str):
         """Create the appropriate ASR instance for the selected engine."""
@@ -1602,6 +1616,126 @@ class ChunkedTranscriber:
             duration_ms = get_audio_duration(audio_path, self.ffmpeg_path) * 1000
             return AutoASR(audio_path, self.progress_callback, self.model_id,
                            start_time=0, end_time=int(duration_ms))
+
+    def _create_pinned_asr(self, engine_name: str, audio_path: str):
+        """Create a single-engine ASR instance by display name (worker path)."""
+        if engine_name == "Bcut":
+            return BcutASR(audio_path, self.progress_callback, self.model_id)
+        if engine_name == "JianYing":
+            duration_ms = get_audio_duration(audio_path, self.ffmpeg_path) * 1000
+            return JianyingASR(audio_path, self.progress_callback,
+                               start_time=0, end_time=int(duration_ms))
+        if engine_name == "KuaiShou":
+            return KuaiShouASR(audio_path, self.progress_callback)
+        raise ValueError(f"Unknown engine: {engine_name}")
+
+    def _transcribe_chunk_pinned(self, i: int, total: int, chunk_path: Path,
+                                 engine_name: str) -> List[dict]:
+        """Transcribe one chunk with a pinned engine (parallel worker path).
+
+        No per-chunk fallback chain — the pool itself is the fallback
+        dimension: another worker picks the chunk up if this engine dies.
+        Chunk-level retries still apply and failures feed the breaker.
+        """
+        last_error: Optional[Exception] = None
+        for attempt in range(1, MAX_CHUNK_RETRIES + 1):
+            if not engine_available(engine_name):
+                raise RuntimeError(f"{engine_name} circuit breaker open")
+            try:
+                asr = self._create_pinned_asr(engine_name, str(chunk_path))
+                utterances = _normalize_utterances(asr.transcribe())
+                record_engine_success(engine_name)
+                if not utterances:
+                    self._log(
+                        f"Chunk {i + 1}/{total} [{engine_name}]: no speech detected "
+                        f"(likely silent segment)")
+                else:
+                    self._log(
+                        f"Chunk {i + 1}/{total} [{engine_name}]: done "
+                        f"({len(utterances)} segments)"
+                        + (f" on attempt {attempt}" if attempt > 1 else ""))
+                return utterances
+            except Exception as e:
+                last_error = e
+                record_engine_failure(engine_name, e)
+                if attempt < MAX_CHUNK_RETRIES:
+                    delay = 5 * (2 ** (attempt - 1))
+                    self._log(
+                        f"Chunk {i + 1}/{total} [{engine_name}]: attempt "
+                        f"{attempt}/{MAX_CHUNK_RETRIES} failed — {e}; retrying in {delay}s")
+                    time.sleep(delay)
+                else:
+                    self._log(
+                        f"Chunk {i + 1}/{total} [{engine_name}]: FAILED after "
+                        f"{MAX_CHUNK_RETRIES} attempts — {e}")
+
+        raise RuntimeError(
+            f"Chunk {i + 1}/{total} failed on {engine_name}: {last_error}") from last_error
+
+    def _run_parallel(self, pending: List[Tuple[int, Path, float]],
+                      total: int) -> Optional[List[int]]:
+        """Transcribe pending chunks on engine-pinned workers.
+
+        All chunks sit in one shared queue; each worker takes the next chunk
+        the moment it is free, so fast engines naturally process more chunks
+        and no worker idles waiting for a slow one. Each engine still handles
+        its own chunks strictly serially (unchanged per-server pacing).
+
+        Returns the list of failed chunk numbers, or None if the pool could
+        not be used (fewer than two engines available).
+        """
+        worker_engines = [n for n in ("Bcut", "JianYing", "KuaiShou")
+                          if engine_available(n)]
+        if len(worker_engines) < 2:
+            return None
+
+        self._log(f"Parallel mode: {len(worker_engines)} engine workers "
+                  f"({', '.join(worker_engines)})")
+        q: "queue.Queue[Tuple[int, Path, float]]" = queue.Queue()
+        for item in pending:
+            q.put(item)
+
+        failed: List[int] = []
+        failed_lock = threading.Lock()
+
+        def run_worker(name: str) -> None:
+            chunks_done = 0
+            while True:
+                try:
+                    i, chunk_path, offset_sec = q.get_nowait()
+                except queue.Empty:
+                    return
+                if not engine_available(name):
+                    # Breaker tripped mid-run — hand the chunk back and exit;
+                    # surviving workers (or the serial fallback) take over.
+                    q.put((i, chunk_path, offset_sec))
+                    self._log(f"{name} worker stopping (circuit breaker open)")
+                    return
+                if chunks_done:
+                    time.sleep(random.uniform(*INTER_CHUNK_DELAY_RANGE))
+                chunks_done += 1
+                self._log(f"Chunk {i + 1}/{total} [{name}]: transcribing "
+                          f"(offset {offset_sec:.0f}s)...")
+                try:
+                    utterances = self._transcribe_chunk_pinned(i, total, chunk_path, name)
+                    _write_srt_atomic(self.chunk_dir / f"chunk_{i:03d}.srt",
+                                      utterances_to_srt(utterances))
+                except Exception as e:
+                    with failed_lock:
+                        failed.append(i + 1)
+                    try:
+                        (self.chunk_dir / f"chunk_{i:03d}.failed").write_text(str(e))
+                    except OSError:
+                        pass
+
+        threads = [threading.Thread(target=run_worker, args=(name,),
+                                    name=f"asr-{name}", daemon=True)
+                   for name in worker_engines]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        return failed
 
     def _transcribe_single_chunk(self, i: int, total: int,
                                  chunk_path: Path, offset_sec: float) -> List[dict]:
@@ -1687,7 +1821,7 @@ class ChunkedTranscriber:
         if manifest_path.exists():
             try:
                 manifest = json.loads(manifest_path.read_text())
-                if manifest.get("source_file") != Path(self.audio_path).name:
+                if manifest.get("source_file") != self.source_name:
                     self._log("Source file changed, restarting from scratch")
                     shutil.rmtree(self.chunk_dir)
                 elif manifest.get("cache_version") != CACHE_VERSION:
@@ -1709,58 +1843,88 @@ class ChunkedTranscriber:
 
         self._log(f"Split into {len(chunks)} chunks")
 
-        # Save manifest
-        manifest_path.write_text(json.dumps({
-            "source_file": Path(self.audio_path).name,
+        # Save manifest (preserving keys like source size/mtime written by
+        # transcribe_file's audio-cache validation)
+        manifest_data: dict = {}
+        try:
+            manifest_data = json.loads(manifest_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+        manifest_data.update({
+            "source_file": self.source_name,
             "total_chunks": len(chunks),
             "chunk_duration": CHUNK_DURATION_SEC,
             "overlap": CHUNK_OVERLAP_SEC,
             "engine": self.engine,
             "model_id": self.model_id,
             "cache_version": CACHE_VERSION,
-        }, indent=2))
+        })
+        manifest_path.write_text(json.dumps(manifest_data, indent=2))
 
-        # Transcribe each chunk — ALL must succeed
-        chunk_results: List[Tuple[int, List[dict]]] = []
-        failed_chunks: List[int] = []
-
+        # Chunks that still need transcription (no cached SRT yet)
+        pending: List[Tuple[int, Path, float]] = []
         for i, (chunk_path, offset_sec) in enumerate(chunks):
-            chunk_srt = self.chunk_dir / f"chunk_{i:03d}.srt"
-            chunk_failed = self.chunk_dir / f"chunk_{i:03d}.failed"
-
-            # Load from cache if a valid SRT already exists. An empty SRT is a
-            # legitimate 0-segment result (silent chunk); _write_srt_atomic
-            # guarantees any existing .srt is complete, so never discard it.
-            if chunk_srt.exists():
-                cached = parse_srt(chunk_srt)
-                self._log(f"Chunk {i + 1}/{len(chunks)}: already transcribed ({len(cached)} segments)")
-                chunk_results.append((int(offset_sec * 1000), cached))
+            if (self.chunk_dir / f"chunk_{i:03d}.srt").exists():
                 continue
-
+            chunk_failed = self.chunk_dir / f"chunk_{i:03d}.failed"
             if chunk_failed.exists():
                 chunk_failed.unlink()
+            pending.append((i, chunk_path, offset_sec))
 
-            # Pacing: jittered pause between chunk submissions keeps the
-            # sustained request rate low on multi-hour files.
-            if i > 0:
-                time.sleep(random.uniform(*INTER_CHUNK_DELAY_RANGE))
+        failed_chunks: List[int] = []
 
-            self._log(f"Chunk {i + 1}/{len(chunks)}: transcribing (offset {offset_sec:.0f}s)...")
+        if pending:
+            self._log(f"{len(pending)} chunk(s) to transcribe "
+                      f"({len(chunks) - len(pending)} cached)")
 
-            try:
-                utterances = self._transcribe_single_chunk(i, len(chunks), chunk_path, offset_sec)
-                # Save chunk SRT immediately (for resume)
-                srt_content = utterances_to_srt(utterances)
-                _write_srt_atomic(chunk_srt, srt_content)
-                chunk_results.append((int(offset_sec * 1000), utterances))
-            except Exception as e:
-                chunk_failed.write_text(str(e))
-                failed_chunks.append(i + 1)
+            # Parallel: engine-pinned workers sharing one queue. A failed or
+            # breaker-blocked worker's chunks fall through to the serial pass.
+            if self._parallel and len(pending) > 1:
+                par_failed = self._run_parallel(pending, len(chunks))
+                if par_failed is not None:
+                    failed_chunks = par_failed
+                    # Recompute from disk: workers wrote SRTs out of order,
+                    # so membership in `pending` no longer means "not done".
+                    pending = [(i, p, o) for (i, p, o) in pending
+                               if not (self.chunk_dir / f"chunk_{i:03d}.srt").exists()]
+
+            # Serial pass: normal path when parallel is off, single-engine
+            # runs, or cleanup of chunks the parallel workers could not
+            # finish (full AutoASR fallback chain per chunk).
+            if pending:
+                for idx, (i, chunk_path, offset_sec) in enumerate(pending):
+                    if idx:
+                        time.sleep(random.uniform(*INTER_CHUNK_DELAY_RANGE))
+                    self._log(f"Chunk {i + 1}/{len(chunks)}: transcribing "
+                              f"(offset {offset_sec:.0f}s)...")
+                    try:
+                        utterances = self._transcribe_single_chunk(
+                            i, len(chunks), chunk_path, offset_sec)
+                        _write_srt_atomic(self.chunk_dir / f"chunk_{i:03d}.srt",
+                                          utterances_to_srt(utterances))
+                    except Exception as e:
+                        try:
+                            (self.chunk_dir / f"chunk_{i:03d}.failed").write_text(str(e))
+                        except OSError:
+                            pass
+                        failed_chunks.append(i + 1)
+
+        # Collect results from cached chunk SRTs. Reading back from disk (in
+        # chunk order) makes the merge independent of completion order, which
+        # the parallel workers do not preserve.
+        chunk_results: List[Tuple[int, List[dict]]] = []
+        missing_chunks: List[int] = []
+        for i, (chunk_path, offset_sec) in enumerate(chunks):
+            chunk_srt = self.chunk_dir / f"chunk_{i:03d}.srt"
+            if chunk_srt.exists():
+                chunk_results.append((int(offset_sec * 1000), parse_srt(chunk_srt)))
+            else:
+                missing_chunks.append(i + 1)
 
         # STRICT: any chunk failure means the whole result is incomplete
-        if failed_chunks:
+        if missing_chunks:
             msg = (
-                f"{len(failed_chunks)}/{len(chunks)} chunk(s) failed (indices {failed_chunks}). "
+                f"{len(missing_chunks)}/{len(chunks)} chunk(s) failed (indices {missing_chunks}). "
                 f"Output NOT written. Re-run to resume from cached chunks."
             )
             return False, msg, 0
@@ -1809,6 +1973,7 @@ def transcribe_file(
     model_id: str = "8",
     engine: str = "auto",
     normalize_audio: bool = True,
+    parallel: bool = False,
 ) -> tuple[bool, str, int]:
     """
     Transcribe a single audio/video file.
@@ -1820,10 +1985,11 @@ def transcribe_file(
         progress_callback: Optional callback for progress updates
         ffmpeg_path: Path to ffmpeg executable
         model_id: Bcut model ID
-        engine: ASR engine — "bcut", "jianying", "local", or "auto" (default)
+        engine: ASR engine — "bcut", "jianying", "kuaishou", "local", or "auto" (default)
         normalize_audio: Apply loudness normalization before upload (default True).
             Helps the ASR hear quiet-but-audible regions instead of misclassifying
             them as silence. Already well-leveled files are skipped automatically.
+        parallel: Run cloud engines concurrently on chunks (engine "auto" only).
 
     Returns:
         Tuple of (success: bool, message: str, segment_count: int)
@@ -1834,39 +2000,62 @@ def transcribe_file(
     if output_path.exists() and not overwrite:
         return False, "SRT file already exists", 0
 
-    # Convert to MP3 if needed
-    mp3_path = file_path.with_suffix(".mp3")
-    needs_conversion = file_path.suffix.lower() != ".mp3"
+    # For chunked (long) files the extracted + normalized working audio is
+    # cached inside the chunk dir so a resumed run skips re-extraction. The
+    # cache is validated against the source file's name/size/mtime plus the
+    # processing version; any mismatch discards the whole chunk dir.
+    SOURCE_AUDIO_NAME = "source_audio.mp3"
+    chunk_dir = Path(str(output_path) + ".chunks")
+    manifest_path = chunk_dir / "manifest.json"
+    cached_audio = chunk_dir / SOURCE_AUDIO_NAME
+    use_audio_cache = get_audio_duration(str(file_path), ffmpeg_path) > CHUNK_DURATION_SEC
 
-    if needs_conversion:
-        if progress_callback:
-            progress_callback(f"Extracting audio from {file_path.name}...")
-        if not extract_audio_to_mp3(str(file_path), str(mp3_path), ffmpeg_path):
-            return False, "Failed to extract audio", 0
+    working_path: Path
+    temp_extracted: Optional[Path] = None
+    temp_normalized: Optional[Path] = None
+
+    if use_audio_cache:
+        src_stat = file_path.stat()
+        reuse = False
+        if manifest_path.exists() and cached_audio.is_file():
+            try:
+                m = json.loads(manifest_path.read_text())
+                reuse = (
+                    m.get("source_file") == file_path.name
+                    and m.get("source_size") == src_stat.st_size
+                    and m.get("source_mtime") == int(src_stat.st_mtime)
+                    and m.get("cache_version") == CACHE_VERSION
+                )
+            except (json.JSONDecodeError, OSError, AttributeError):
+                reuse = False
+
+        if reuse:
+            if progress_callback:
+                progress_callback("Reusing cached audio (extraction skipped)")
+            working_path = cached_audio
+        else:
+            # Invalidate the whole cache (source changed or version bump)
+            if chunk_dir.exists():
+                shutil.rmtree(chunk_dir, ignore_errors=True)
+
+            working_path, temp_extracted, temp_normalized = _extract_working_audio(
+                file_path, cached_audio, normalize_audio, progress_callback, ffmpeg_path)
+            if working_path is None:
+                return False, "Failed to extract audio", 0
+            chunk_dir.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_text(json.dumps({
+                "source_file": file_path.name,
+                "source_size": src_stat.st_size,
+                "source_mtime": int(src_stat.st_mtime),
+                "cache_version": CACHE_VERSION,
+            }, indent=2))
     else:
-        mp3_path = file_path
-
-    # Normalize loudness before chunking/upload. Applied to the full extracted
-    # MP3 so both the short-file path and every split chunk benefit from one
-    # pass. On any failure we fall back to the un-normalized file (never worse).
-    normalized_path: Optional[Path] = None
-    if normalize_audio:
-        if progress_callback:
-            progress_callback(f"Measuring audio loudness for {file_path.name}...")
-        norm_tmp = mp3_path.with_suffix(mp3_path.suffix + ".norm.mp3")
-        status = normalize_audio_loudness(str(mp3_path), str(norm_tmp), ffmpeg_path)
-        if status == NormalizeStatus.NORMALIZED:
-            normalized_path = norm_tmp
-            if progress_callback:
-                progress_callback(f"Normalized audio for {file_path.name}")
-        elif status == NormalizeStatus.SKIPPED:
-            if progress_callback:
-                progress_callback(
-                    f"Audio for {file_path.name} already well-leveled — skipping normalization")
-        elif progress_callback:
-            progress_callback("Loudness normalization failed — using original audio")
-
-    working_path = normalized_path if normalized_path is not None else mp3_path
+        # Short file — no chunk dir; plain temp-file flow.
+        target = file_path.with_suffix(".mp3")
+        working_path, temp_extracted, temp_normalized = _extract_working_audio(
+            file_path, target, normalize_audio, progress_callback, ffmpeg_path)
+        if working_path is None:
+            return False, "Failed to extract audio", 0
 
     try:
         transcriber = ChunkedTranscriber(
@@ -1876,6 +2065,8 @@ def transcribe_file(
             progress_callback=progress_callback,
             ffmpeg_path=ffmpeg_path,
             model_id=model_id,
+            parallel=parallel,
+            source_name=file_path.name,
         )
         return transcriber.transcribe()
 
@@ -1883,18 +2074,59 @@ def transcribe_file(
         return False, str(e), 0
 
     finally:
-        # Clean up temporary normalized MP3 (created by this function)
-        if normalized_path is not None and normalized_path.exists():
-            try:
-                normalized_path.unlink()
-            except OSError:
-                pass
-        # Clean up temporary MP3 if it was converted
-        if needs_conversion and mp3_path.exists():
-            try:
-                mp3_path.unlink()
-            except OSError:
-                pass
+        # Clean up temp files only; the cached source audio stays in the
+        # chunk dir so failed runs can resume without re-extracting.
+        for temp in (temp_normalized, temp_extracted):
+            if temp is not None and temp.exists():
+                try:
+                    temp.unlink()
+                except OSError:
+                    pass
+
+
+def _extract_working_audio(file_path: Path, final_target: Path,
+                           normalize_audio: bool,
+                           progress_callback: Optional[Callable[[str], None]],
+                           ffmpeg_path: str) -> Tuple[Path, Optional[Path], Optional[Path]]:
+    """Extract (and optionally normalize) audio into *final_target*.
+
+    Returns (final_path, temp_extracted, temp_normalized) — the temps must be
+    deleted by the caller once the ASR run is over.
+    """
+    temp_extracted: Optional[Path] = None
+    if file_path.suffix.lower() != ".mp3":
+        temp_extracted = file_path.with_suffix(".mp3")
+        if progress_callback:
+            progress_callback(f"Extracting audio from {file_path.name}...")
+        if not extract_audio_to_mp3(str(file_path), str(temp_extracted), ffmpeg_path):
+            return None, None, None
+        source = temp_extracted
+    else:
+        source = file_path
+
+    temp_normalized: Optional[Path] = None
+    result = source
+    if normalize_audio:
+        if progress_callback:
+            progress_callback(f"Measuring audio loudness for {file_path.name}...")
+        norm_tmp = source.with_suffix(source.suffix + ".norm.mp3")
+        status = normalize_audio_loudness(str(source), str(norm_tmp), ffmpeg_path)
+        if status == NormalizeStatus.NORMALIZED:
+            temp_normalized = norm_tmp
+            result = norm_tmp
+            if progress_callback:
+                progress_callback(f"Normalized audio for {file_path.name}")
+        elif status == NormalizeStatus.SKIPPED:
+            if progress_callback:
+                progress_callback(
+                    f"Audio for {file_path.name} already well-leveled — skipping normalization")
+        elif progress_callback:
+            progress_callback("Loudness normalization failed — using original audio")
+
+    if result != final_target:
+        final_target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(str(result), str(final_target))
+    return final_target, temp_extracted, temp_normalized
 
 
 SUPPORTED_EXTENSIONS = frozenset({
