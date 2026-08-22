@@ -26,8 +26,13 @@ class Config:
     # Audio preprocessing
     normalize_audio: bool = True
 
-    # ASR engine: "auto" (Bcut with Jianying fallback) or "local" (sherpa-onnx)
+    # ASR engine: "auto" (Bcut → JianYing → KuaiShou fallback chain) or "local" (sherpa-onnx)
     engine: str = "auto"
+
+    # Cloud transcription tunables (consumed by transcribe_core)
+    chunk_duration_sec: int = 540   # 9-minute chunks
+    chunk_overlap_sec: int = 10
+    max_chunk_retries: int = 3
 
     # Window state
     window_width: int = 700

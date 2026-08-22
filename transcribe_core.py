@@ -43,12 +43,33 @@ def _no_window_kwargs() -> dict:
 # HTTP Utilities (with automatic retry on transient errors)
 # =============================================================================
 
-HTTP_RETRIES = 4
+# Retry only genuinely transient faults (resets / timeouts / 5xx). Retrying
+# through 4xx blocks (412 risk-control, 429 rate-limit) tells the server we
+# are an aggressive bot and turns soft throttles into hard IP bans, so those
+# fail fast and trip the per-engine circuit breaker instead.
+HTTP_RETRIES = 2
 HTTP_RETRY_BASE_DELAY = 2.0
+
+# Status codes that are terminal for the engine, never retried at HTTP level.
+_TERMINAL_HTTP_CODES = frozenset({400, 401, 403, 412, 429})
+
+
+class TerminalHttpError(RuntimeError):
+    """Non-retryable HTTP rejection (auth/risk-control/rate-limit).
+
+    Carries the HTTP status so the circuit breaker can decide how long to
+    disable the engine.
+    """
+
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
 
 
 def _is_transient_error(e: Exception) -> bool:
     """Return True if the exception is likely a transient network/server error."""
+    if isinstance(e, TerminalHttpError):
+        return False
     if isinstance(e, urllib.error.URLError):
         return True
     if isinstance(e, TimeoutError):
@@ -56,7 +77,7 @@ def _is_transient_error(e: Exception) -> bool:
     if isinstance(e, ConnectionError):
         return True
     if isinstance(e, urllib.error.HTTPError):
-        return e.code >= 500 or e.code == 429
+        return e.code >= 500
     msg = str(e).lower()
     if any(k in msg for k in ("timeout", "timed out")):
         return True
@@ -86,6 +107,14 @@ def _retry(func: Callable, *args, retries: int = HTTP_RETRIES,
     raise last_exc  # pragma: no cover
 
 
+def _raise_http_error(e: urllib.error.HTTPError, context: str) -> None:
+    """Convert an HTTPError into a RuntimeError (or TerminalHttpError)."""
+    body = e.read().decode("utf-8", errors="ignore")
+    if e.code in _TERMINAL_HTTP_CODES:
+        raise TerminalHttpError(e.code, f"{context}: HTTP {e.code}: {body}") from e
+    raise RuntimeError(f"{context}: HTTP {e.code}: {body}") from e
+
+
 def http_post(url: str, data: bytes = None, json_data: dict = None,
               headers: dict = None) -> dict:
     """Make HTTP POST request and return JSON response."""
@@ -105,8 +134,7 @@ def http_post(url: str, data: bytes = None, json_data: dict = None,
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return json.load(resp)
         except urllib.error.HTTPError as e:
-            error_body = e.read().decode("utf-8", errors="ignore")
-            raise RuntimeError(f"HTTP {e.code}: {error_body}") from e
+            _raise_http_error(e, "Request failed")
         except urllib.error.URLError as e:
             raise RuntimeError(f"Network error: {e.reason}") from e
 
@@ -124,7 +152,7 @@ def http_put(url: str, data: bytes, headers: dict = None) -> dict:
             with urllib.request.urlopen(req, timeout=60) as resp:
                 return dict(resp.getheaders())
         except urllib.error.HTTPError as e:
-            raise RuntimeError(f"Upload failed: HTTP {e.code}") from e
+            _raise_http_error(e, "Upload failed")
 
     return _retry(_do)
 
@@ -145,7 +173,7 @@ def http_get(url: str, params: dict = None, headers: dict = None) -> dict:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return json.load(resp)
         except urllib.error.HTTPError as e:
-            raise RuntimeError(f"HTTP {e.code}") from e
+            _raise_http_error(e, "Request failed")
 
     return _retry(_do)
 
@@ -172,8 +200,7 @@ def http_post_raw(url: str, data: bytes = None, json_data: dict = None,
                     return json.load(resp)
                 return resp.read()
         except urllib.error.HTTPError as e:
-            error_body = e.read().decode("utf-8", errors="ignore")
-            raise RuntimeError(f"HTTP {e.code}: {error_body}") from e
+            _raise_http_error(e, "Request failed")
         except urllib.error.URLError as e:
             raise RuntimeError(f"Network error: {e.reason}") from e
 
@@ -194,11 +221,77 @@ def http_put_json(url: str, data: bytes, headers: dict = None) -> dict:
                     return json.load(resp)
                 return {"_http_ok": resp.status == 200}
         except urllib.error.HTTPError as e:
-            raise RuntimeError(
-                f"Upload failed: HTTP {e.code}: {e.read().decode('utf-8', errors='ignore')}"
-            ) from e
+            _raise_http_error(
+                e,
+                f"Upload failed: {e.read().decode('utf-8', errors='ignore')}")
 
     return _retry(_do)
+
+
+# =============================================================================
+# Request Pacing & Engine Circuit Breaker
+# =============================================================================
+# These unofficial endpoints run risk control: metronomic 1 Hz polling and
+# retry storms are the fastest way to get throttled (or 412'd). Everything
+# here exists to keep total request volume low and non-uniform.
+
+POLL_GRACE_SEC = 10.0          # wait after task creation before first poll
+POLL_INTERVAL_START_SEC = 5.0  # adaptive poll interval, grows to the cap
+POLL_INTERVAL_MAX_SEC = 15.0
+INTER_CHUNK_DELAY_RANGE = (3.0, 6.0)  # jittered pause between chunk submissions
+
+CIRCUIT_FAILURE_THRESHOLD = 3  # consecutive terminal failures trip the breaker
+CIRCUIT_COOLDOWN_SEC = 20 * 60  # engine disabled for this long once tripped
+
+_engine_state: dict = {}
+_engine_state_lock = threading.Lock()
+
+
+def _jitter(delay: float, spread: float = 0.2) -> float:
+    """Scale a delay by ±spread so traffic is never metronomic."""
+    return delay * random.uniform(1.0 - spread, 1.0 + spread)
+
+
+def _next_poll_interval(current: float) -> float:
+    """Grow the poll interval toward the cap, with jitter."""
+    return min(_jitter(max(current, POLL_INTERVAL_START_SEC) * 1.5), POLL_INTERVAL_MAX_SEC)
+
+
+def engine_available(name: str) -> bool:
+    """True unless the engine's circuit breaker is open (in cooldown)."""
+    with _engine_state_lock:
+        state = _engine_state.get(name)
+        if state is None:
+            return True
+        return time.time() >= state["disabled_until"]
+
+
+def engine_cooldown_remaining(name: str) -> float:
+    with _engine_state_lock:
+        state = _engine_state.get(name)
+        if state is None:
+            return 0.0
+        return max(0.0, state["disabled_until"] - time.time())
+
+
+def record_engine_success(name: str) -> None:
+    with _engine_state_lock:
+        _engine_state.setdefault(name, {"consecutive": 0, "disabled_until": 0.0})
+        _engine_state[name]["consecutive"] = 0
+
+
+def record_engine_failure(name: str, error: Exception) -> None:
+    """Count a terminal engine failure; trip the breaker at the threshold.
+
+    An HTTP block (412/429/...) trips the breaker immediately — the endpoint
+    has told us to stop, so we stop instead of retrying through it.
+    """
+    with _engine_state_lock:
+        state = _engine_state.setdefault(name, {"consecutive": 0, "disabled_until": 0.0})
+        state["consecutive"] += 1
+        if isinstance(error, TerminalHttpError) or state["consecutive"] >= CIRCUIT_FAILURE_THRESHOLD:
+            state["disabled_until"] = time.time() + CIRCUIT_COOLDOWN_SEC
+            state["consecutive"] = 0
 
 
 # =============================================================================
@@ -299,21 +392,32 @@ class BcutASR:
         return self.task_id
 
     def get_result(self) -> dict:
-        """Poll for transcription result."""
+        """Poll for transcription result with adaptive, jittered intervals.
+
+        Server-side ASR on a several-minute chunk takes a while, so we sleep a
+        grace period before the first poll and then grow the interval toward a
+        cap — a handful of requests per chunk instead of hundreds.
+        """
         self._log("Transcribing (may take 1-5 minutes)...")
+        time.sleep(_jitter(POLL_GRACE_SEC))
 
         consecutive_errors = 0
-        for i in range(600):  # Max ~10 minutes
+        interval = POLL_INTERVAL_START_SEC
+        deadline = time.time() + 15 * 60  # overall budget ~15 min
+        i = 0
+        while time.time() < deadline:
             try:
                 resp = http_get(
                     self.API_QUERY_RESULT,
-                    params={"model_id": 7, "task_id": self.task_id},
+                    params={"model_id": self.model_id, "task_id": self.task_id},
                     headers=self.HEADERS
                 )
                 consecutive_errors = 0
+            except TerminalHttpError:
+                raise
             except Exception as e:
                 consecutive_errors += 1
-                if consecutive_errors >= 10:
+                if consecutive_errors >= 6:
                     raise RuntimeError(
                         f"ASR polling failed after {consecutive_errors} consecutive errors: {e}"
                     ) from e
@@ -329,14 +433,15 @@ class BcutASR:
                 if result is None:
                     raise RuntimeError("ASR completed but no result data returned")
                 return json.loads(result) if isinstance(result, str) else result
-            elif state in (3, 5):  # Failed or cancelled
+            elif state in (3, 5):  # Failed or cancelled — stop immediately
                 raise RuntimeError(f"ASR task failed with state: {state}")
 
-            # Animated loading
             dots = i % 4
             if self.progress_callback:
                 self._log(f"Transcribing{'.' * dots}{' ' * (3 - dots)}")
-            time.sleep(1)
+            time.sleep(interval)
+            interval = _next_poll_interval(interval)
+            i += 1
 
         raise RuntimeError("ASR task timeout")
 
@@ -388,18 +493,28 @@ def _aws_signature(secret_key: str, request_parameters: str, headers: dict,
     return hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-def _get_tid() -> str:
-    i = str(datetime.datetime.now().year)[3]
-    fr = 390 + int(i)
-    ed = "3278516897751" if int(i) % 2 != 0 else f"{uuid.getnode():013d}"
-    return f"{fr}{ed}"
+# Per-run device id: a random 16-digit numeric string generated once per
+# process and reused for the session. A permanently fixed tdid shared by
+# every user of a tool is trivially blacklistable; per-request rotation
+# looks even less like a real device.
+_SESSION_TDID = "".join(str(random.randint(0, 9)) for _ in range(16))
+
+# Client baseline the sign-ver:1 scheme is tied to. The submit endpoint now
+# rejects genuinely old versions with ret 3510 ("block low version"), while
+# newer values would enforce stronger native signing (x-argus/x-ladon) we
+# cannot mimic — 6.6.0 is the known-good middle ground.
+_JY_PF = "4"
+_JY_APPVR = "6.6.0"
+_JY_UA = ("Cronet/TTNetVersion:01594da2 2023-03-14 "
+          "QuicVersion:46688bb4 2022-11-28")
 
 
 class JianyingASR:
     """JianYing (CapCut) ASR API - Free Chinese/English transcription (fallback engine).
 
     Uses ByteDance's JianYing cloud ASR service with AWS S3-style upload.
-    Depends on an external sign service for request authentication.
+    Request signing is computed locally (sign-ver: 1 legacy scheme reverse-
+    engineered in the upstream bk_asr project) — no external sign service.
     """
 
     def __init__(self, audio_path: str, progress_callback: Optional[Callable[[str], None]] = None,
@@ -408,7 +523,7 @@ class JianyingASR:
         self.progress_callback = progress_callback
         self.start_time = start_time
         self.end_time = end_time
-        self.tdid = _get_tid()
+        self.tdid = _SESSION_TDID
 
         # Populated during upload
         self.session_token = None
@@ -427,43 +542,25 @@ class JianyingASR:
         with open(self.audio_path, "rb") as f:
             return f.read()
 
-    def _generate_sign(self, url_path: str) -> Tuple[str, str]:
-        """Get request signature from external sign service."""
+    @staticmethod
+    def _generate_sign(url_path: str) -> Tuple[str, str]:
+        """Compute the sign-ver:1 request signature locally.
+
+        Scheme (from upstream bk_asr, reverse-engineered from the JianYing PC
+        client): md5 over "9e2c|{last 7 chars of url path}|pf|appvr|time|tdid|11ac".
+        Sensitive to system clock drift — keep the machine NTP-synced.
+        """
         current_time = str(int(time.time()))
-        data = {
-            "url": url_path,
-            "current_time": current_time,
-            "pf": "4",
-            "appvr": "6.6.0",
-            "tdid": self.tdid,
-        }
-        headers = {
-            "User-Agent": "SubtitleTools/1.0",
-            "tdid": self.tdid,
-            "t": current_time,
-        }
-        try:
-            resp = http_post_raw(
-                "https://asrtools-update.bkfeng.top/sign",
-                json_data=data, headers=headers, timeout=10
-            )
-            if isinstance(resp, dict):
-                sign = resp.get("sign")
-            else:
-                resp_data = json.loads(resp)
-                sign = resp_data.get("sign")
-            if not sign:
-                raise RuntimeError("No 'sign' in response from sign service")
-            return sign.lower(), current_time
-        except Exception as e:
-            raise RuntimeError(f"Jianying sign service unavailable: {e}") from e
+        sign_str = f"9e2c|{url_path[-7:]}|{_JY_PF}|{_JY_APPVR}|{current_time}|{_SESSION_TDID}|11ac"
+        sign = hashlib.md5(sign_str.encode()).hexdigest()
+        return sign.lower(), current_time
 
     def _build_headers(self, device_time: str, sign: str) -> dict:
         return {
-            "User-Agent": "Cronet/TTNetVersion:d4572e53 2024-06-12 QuicVersion:4bf243e0 2023-04-17",
-            "appvr": "6.6.0",
+            "User-Agent": _JY_UA,
+            "appvr": _JY_APPVR,
             "device-time": str(device_time),
-            "pf": "4",
+            "pf": _JY_PF,
             "sign": sign,
             "sign-ver": "1",
             "tdid": self.tdid,
@@ -590,16 +687,21 @@ class JianyingASR:
 
         query_id = self.submit()
 
-        # Jianying processes quickly, poll every 2s for up to ~10 min
         self._log("Jianying: Transcribing...")
+        time.sleep(_jitter(POLL_GRACE_SEC))
         consecutive_errors = 0
-        for i in range(300):
+        interval = POLL_INTERVAL_START_SEC
+        deadline = time.time() + 15 * 60
+        i = 0
+        while time.time() < deadline:
             try:
                 resp_data = self.query(query_id)
                 consecutive_errors = 0
+            except TerminalHttpError:
+                raise
             except Exception as e:
                 consecutive_errors += 1
-                if consecutive_errors >= 10:
+                if consecutive_errors >= 6:
                     raise RuntimeError(
                         f"Jianying polling failed after {consecutive_errors} errors: {e}"
                     ) from e
@@ -607,15 +709,107 @@ class JianyingASR:
                 time.sleep(min(2 ** consecutive_errors, 30))
                 continue
 
-            utterances = resp_data.get("data", {}).get("utterances")
+            data = resp_data.get("data") or {}
+            utterances = data.get("utterances")
             if utterances is not None:
                 self._log("Jianying: Transcription complete!")
                 return utterances
+            # Explicit failure status — stop instead of polling to timeout.
+            if str(resp_data.get("ret", "0")) not in ("0", "None"):
+                if data.get("progress") in ("failed", "fail", "-1"):
+                    raise RuntimeError(
+                        f"Jianying task failed: {resp_data.get('errmsg', 'Unknown')}")
             dots = i % 4
             self._log(f"Jianying: Waiting{'.' * dots}{' ' * (3 - dots)}")
-            time.sleep(2)
+            time.sleep(interval)
+            interval = _next_poll_interval(interval)
+            i += 1
 
         raise RuntimeError("Jianying transcription timeout")
+
+
+# =============================================================================
+# KuaiShou ASR Implementation
+# =============================================================================
+
+def _multipart_body(field_name: str, filename: str, content_type: str,
+                    payload: bytes, fields: dict) -> Tuple[bytes, str]:
+    """Build a multipart/form-data body with urllib (no requests dependency)."""
+    boundary = f"----AutoSubBoundary{uuid.uuid4().hex}"
+    parts: List[bytes] = []
+    for name, value in fields.items():
+        parts.append(
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n".encode()
+        )
+    parts.append(
+        (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{field_name}\"; "
+         f"filename=\"{filename}\"\r\nContent-Type: {content_type}\r\n\r\n").encode()
+    )
+    parts.append(payload)
+    parts.append(f"\r\n--{boundary}--\r\n".encode())
+    return b"".join(parts), f"multipart/form-data; boundary={boundary}"
+
+
+class KuaiShouASR:
+    """KuaiShou ASR - tier-3 fallback engine (independent of Bilibili/ByteDance).
+
+    One synchronous multipart POST; the response already contains the
+    utterances, so there is no polling and almost no rate-limit surface.
+    Ported from the upstream bk_asr project.
+    """
+
+    API_URL = "https://ai.kuaishou.com/api/effects/subtitle_generate"
+
+    def __init__(self, audio_path: str, progress_callback: Optional[Callable[[str], None]] = None):
+        self.audio_path = audio_path
+        self.progress_callback = progress_callback
+
+    def _log(self, message: str) -> None:
+        if self.progress_callback:
+            self.progress_callback(message)
+
+    def transcribe(self) -> List[dict]:
+        self._log("KuaiShou: uploading audio (synchronous engine)...")
+        with open(self.audio_path, "rb") as f:
+            payload = f.read()
+        body, content_type = _multipart_body(
+            "file", "audio.mp3", "audio/mpeg", payload, {"typeId": "1"})
+        headers = {
+            "Content-Type": content_type,
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/124.0.0.0 Safari/537.36"),
+            "Origin": "https://ai.kuaishou.com",
+            "Referer": "https://ai.kuaishou.com/",
+        }
+
+        def _do():
+            req = urllib.request.Request(self.API_URL, data=body, headers=headers, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=300) as resp:
+                    return json.load(resp)
+            except urllib.error.HTTPError as e:
+                _raise_http_error(e, "KuaiShou request failed")
+
+        resp_data = _retry(_do)
+        # 200-with-error-code responses: 501 means the effect is disabled
+        # server-side (observed 2026-08) — terminal, trip the circuit breaker
+        # so the fallback chain skips KuaiShou instead of re-probing per chunk.
+        if isinstance(resp_data, dict) and resp_data.get("code") not in (None, 0, 200):
+            code = resp_data.get("code")
+            if code == 501:
+                raise TerminalHttpError(
+                    501, f"KuaiShou effect disabled server-side: {resp_data.get('msg')}")
+            raise RuntimeError(
+                f"KuaiShou error {code}: {resp_data.get('msg', json.dumps(resp_data)[:200])}")
+        data = (resp_data or {}).get("data") or {}
+        utterances = data.get("text")
+        if utterances is None:
+            raise RuntimeError(
+                f"KuaiShou returned no transcript: {json.dumps(resp_data)[:300]}")
+        # Normalize 'text' -> 'transcript' via _normalize_utterances downstream.
+        self._log("KuaiShou: transcription complete!")
+        return utterances
 
 
 # =============================================================================
@@ -624,12 +818,23 @@ class JianyingASR:
 
 _local_recognizer = None
 _local_recognizer_lock = threading.Lock()
+_local_vad = None
 
 _LOCAL_MAX_CHARS_PER_LINE = 30
+_LOCAL_NUM_THREADS = 8
+
+# Feed audio to the VAD in 0.1 s windows so its internal circular buffer never
+# overflows on multi-hour files.
+_VAD_WINDOW_SAMPLES = 1600
 
 
 def _get_sherpa_recognizer():
-    """Build (once) and return the cached local OnlineRecognizer."""
+    """Build (once) and return the cached local OfflineRecognizer.
+
+    Uses the FireRedASR2 CTC bilingual zh-en model (fully offline). Unlike the
+    old streaming transducer this is a non-streaming recognizer, so a fresh
+    stream is created per chunk/audio file.
+    """
     global _local_recognizer
     if _local_recognizer is not None:
         return _local_recognizer
@@ -649,25 +854,85 @@ def _get_sherpa_recognizer():
                     "Local model not downloaded. Use the 'Download local model' "
                     "button in the app first."
                 ) from e
-            _local_recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(
+            _local_recognizer = sherpa_onnx.OfflineRecognizer.from_fire_red_asr_ctc(
+                model=paths["model"],
                 tokens=paths["tokens"],
-                encoder=paths["encoder"],
-                decoder=paths["decoder"],
-                joiner=paths["joiner"],
-                num_threads=2,
-                sample_rate=16000,
-                feature_dim=80,
-                decoding_method="greedy_search",
+                num_threads=_LOCAL_NUM_THREADS,
             )
         return _local_recognizer
+
+
+def _get_sherpa_vad():
+    """Build (once) and return the cached silero VoiceActivityDetector."""
+    global _local_vad
+    if _local_vad is not None:
+        return _local_vad
+    with _local_recognizer_lock:
+        if _local_vad is None:
+            try:
+                import sherpa_onnx
+            except ImportError as e:
+                raise RuntimeError(
+                    "sherpa-onnx is not installed. Run 'uv sync' to install it."
+                ) from e
+            try:
+                from local_model import vad_model_path
+                vad_path = vad_model_path()
+            except FileNotFoundError as e:
+                raise RuntimeError(
+                    "VAD model missing. Use the 'Download local model' button "
+                    "in the app first."
+                ) from e
+            vad_config = sherpa_onnx.VadModelConfig()
+            vad_config.silero_vad.model = vad_path
+            vad_config.silero_vad.threshold = 0.5
+            vad_config.silero_vad.min_silence_duration = 0.5
+            vad_config.silero_vad.min_speech_duration = 0.25
+            vad_config.silero_vad.max_speech_duration = 20.0
+            vad_config.silero_vad.window_size = 512
+            vad_config.sample_rate = 16000
+            vad_config.num_threads = 1
+            vad_config.validate()
+            _local_vad = sherpa_onnx.VoiceActivityDetector(vad_config)
+        return _local_vad
+
+
+def _vad_segments(samples, sample_rate: int) -> List[Tuple[int, int]]:
+    """Split *samples* into speech segments using silero VAD.
+
+    Returns a list of ``(start_sample, end_sample)`` 16 kHz ranges (exclusive
+    end). Each segment is short enough for the non-streaming FireRedASR2 CTC
+    encoder to decode without exhausting memory.
+    """
+    vad = _get_sherpa_vad()
+    segments: List[Tuple[int, int]] = []
+    for i in range(0, len(samples), _VAD_WINDOW_SAMPLES):
+        vad.accept_waveform(samples[i:i + _VAD_WINDOW_SAMPLES])
+        while not vad.empty():
+            # seg.start is already relative to the stream start (global offset).
+            seg = vad.front
+            start = seg.start
+            end = start + len(seg.samples)
+            segments.append((start, end))
+            vad.pop()
+    vad.flush()
+    while not vad.empty():
+        seg = vad.front
+        start = seg.start
+        end = start + len(seg.samples)
+        segments.append((start, end))
+        vad.pop()
+    vad.reset()
+    return segments
 
 
 def _local_split_utterances(tokens: List[str], timestamps: List[float]) -> List[dict]:
     """Group ASR tokens into subtitle lines with start/end times (ms).
 
     The bilingual model emits Chinese character tokens plus English BPE pieces
-    where a leading '▁' (U+2581) marks a word boundary (becomes a space).
-    Special tokens like <blk>/<sos/eos>/<unk> are dropped.
+    where a leading '▁' (U+2581) marks a word boundary (becomes a space); the
+    FireRedASR2 CTC model instead emits English pieces with an already-present
+    leading space. Special tokens like <blk>/<sos/eos>/<unk> are dropped.
     """
     utterances: List[dict] = []
     buf: List[str] = []
@@ -708,9 +973,9 @@ def _local_split_utterances(tokens: List[str], timestamps: List[float]) -> List[
 class SherpaLocalASR:
     """Local sherpa-onnx transcription — fully offline, Chinese + English.
 
-    Uses the sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16
-    streaming transducer ASR model via OnlineRecognizer. Outputs real Chinese
-    characters and English words (not pinyin/phones).
+    Uses the sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25 (FireRedASR2
+    CTC) offline model via OfflineRecognizer. Outputs real Chinese characters
+    and English words with per-token timestamps.
     """
 
     def __init__(self, audio_path: str, progress_callback: Optional[Callable[[str], None]] = None,
@@ -744,20 +1009,42 @@ class SherpaLocalASR:
         return np.frombuffer(result.stdout, dtype=np.float32), 16000
 
     def transcribe(self) -> List[dict]:
-        """Transcribe the audio file offline. Returns list of utterances."""
+        """Transcribe the audio file offline. Returns list of utterances.
+
+        The non-streaming FireRedASR2 CTC encoder can only handle bounded
+        durations, so the audio is first split into speech segments with a tiny
+        silero VAD model. Each segment is decoded independently and its
+        timestamps are offset by the segment's start time.
+        """
         self._log("Local: Transcribing offline...")
         recognizer = _get_sherpa_recognizer()
         samples, sample_rate = self._load_audio()
 
-        stream = recognizer.create_stream()
-        stream.accept_waveform(sample_rate, samples)
-        stream.input_finished()
-        while recognizer.is_ready(stream):
+        segments = _vad_segments(samples, sample_rate)
+        self._log(f"Local: VAD found {len(segments)} speech segments")
+        total_ms = int(len(samples) / sample_rate * 1000)
+
+        utterances: List[dict] = []
+        for seg_index, (start_sample, end_sample) in enumerate(segments, start=1):
+            seg_audio = samples[start_sample:end_sample]
+            stream = recognizer.create_stream()
+            stream.accept_waveform(sample_rate, seg_audio)
             recognizer.decode_stream(stream)
 
-        tokens = recognizer.tokens(stream)
-        timestamps = recognizer.timestamps(stream)
-        utterances = _local_split_utterances(tokens, timestamps)
+            result = stream.result
+            tokens = list(result.tokens)
+            timestamps = list(result.timestamps)
+            seg_uts = _local_split_utterances(tokens, timestamps)
+            offset_ms = int(start_sample / sample_rate * 1000)
+            for u in seg_uts:
+                u["start_time"] += offset_ms
+                u["end_time"] += offset_ms
+                if u["end_time"] > total_ms:
+                    u["end_time"] = total_ms
+            utterances.extend(seg_uts)
+            if seg_index % 25 == 0 or seg_index == len(segments):
+                self._log(f"Local: {seg_index}/{len(segments)} segments")
+
         self._log(f"Local: done ({len(utterances)} segments)")
         return utterances
 
@@ -775,7 +1062,13 @@ def _normalize_utterances(utterances: List[dict]) -> List[dict]:
 
 
 class AutoASR:
-    """Auto-fallback ASR: tries Bcut first, falls back to Jianying on failure."""
+    """Auto-fallback ASR: Bcut → JianYing → KuaiShou, with a per-engine
+    circuit breaker.
+
+    Once an engine trips its breaker (terminal HTTP block or repeated
+    failures), subsequent chunks skip it for the cooldown instead of
+    hammering a blocked endpoint chunk after chunk.
+    """
 
     def __init__(self, audio_path: str, progress_callback: Optional[Callable[[str], None]] = None,
                  model_id: str = "8", start_time: int = 0, end_time: int = 6000):
@@ -789,29 +1082,34 @@ class AutoASR:
         if self.progress_callback:
             self.progress_callback(message)
 
-    def transcribe(self) -> List[dict]:
-        bcut_error = None
-        try:
-            self._log("Trying Bcut ASR...")
-            asr = BcutASR(self.audio_path, self.progress_callback, self.model_id)
-            utterances = asr.transcribe()
-            self._log("Bcut ASR succeeded")
-            return _normalize_utterances(utterances)
-        except Exception as e:
-            bcut_error = e
-            self._log(f"Bcut failed: {e}")
-            self._log("Falling back to Jianying ASR...")
+    def _engine_factories(self):
+        return [
+            ("Bcut", lambda: BcutASR(self.audio_path, self.progress_callback, self.model_id)),
+            ("JianYing", lambda: JianyingASR(
+                self.audio_path, self.progress_callback, self.start_time, self.end_time)),
+            ("KuaiShou", lambda: KuaiShouASR(self.audio_path, self.progress_callback)),
+        ]
 
-        try:
-            asr = JianyingASR(self.audio_path, self.progress_callback,
-                              self.start_time, self.end_time)
-            utterances = asr.transcribe()
-            self._log("Jianying ASR succeeded")
-            return _normalize_utterances(utterances)
-        except Exception as jianying_error:
-            raise RuntimeError(
-                f"All ASR engines failed. Bcut: {bcut_error}. Jianying: {jianying_error}"
-            ) from jianying_error
+    def transcribe(self) -> List[dict]:
+        errors: List[str] = []
+        for name, factory in self._engine_factories():
+            if not engine_available(name):
+                cooldown = engine_cooldown_remaining(name)
+                self._log(f"{name}: skipped (circuit breaker open, {cooldown / 60:.0f} min left)")
+                errors.append(f"{name}: in cooldown")
+                continue
+            try:
+                self._log(f"Trying {name} ASR...")
+                utterances = factory().transcribe()
+                record_engine_success(name)
+                self._log(f"{name} ASR succeeded")
+                return _normalize_utterances(utterances)
+            except Exception as e:
+                record_engine_failure(name, e)
+                errors.append(f"{name}: {e}")
+                self._log(f"{name} failed: {e}")
+
+        raise RuntimeError("All ASR engines failed. " + " | ".join(errors))
 
 
 # =============================================================================
@@ -896,8 +1194,8 @@ def extract_audio_to_mp3(input_path: str, output_path: str,
         subprocess.run(
             [
                 ffmpeg_path, "-y", "-i", input_path,
-                "-vn", "-acodec", "libmp3lame", "-q:a", "2",
-                "-ar", "44100", "-ac", "1",
+                "-vn", "-acodec", "libmp3lame", "-b:a", "48k",
+                "-ar", "16000", "-ac", "1",
                 output_path
             ],
             stdout=subprocess.PIPE,
@@ -977,8 +1275,8 @@ def normalize_audio_loudness(input_path: str, output_path: str,
             [
                 ffmpeg_path, "-y", "-i", input_path,
                 "-vn", "-af", NORMALIZE_FILTER,
-                "-acodec", "libmp3lame", "-q:a", "2",
-                "-ar", "44100", "-ac", "1",
+                "-acodec", "libmp3lame", "-b:a", "48k",
+                "-ar", "16000", "-ac", "1",
                 output_path
             ],
             stdout=subprocess.PIPE,
@@ -1008,7 +1306,10 @@ MIN_SEGMENTS_PER_MIN = 2  # Sanity threshold: <2 segments/min likely means gaps
 # Bumped when chunk-processing behavior changes (e.g. added normalization). A
 # stale cache from an older version is discarded so the new behavior actually
 # takes effect instead of reusing old chunk SRTs.
-CACHE_VERSION = 3
+# v4: chunks re-encoded to 16 kHz mono 48 kbps (speech-optimized, ~6x smaller
+# uploads); cloud pacing/retry behavior also changed but that doesn't affect
+# cached SRTs.
+CACHE_VERSION = 4
 
 # Loudness targets used by the measure-then-decide normalizer. highpass strips
 # sub-bass rumble that inflates the noise floor and confuses the ASR's
@@ -1020,6 +1321,22 @@ WELL_LEVELED_MIN_LUFS = -19
 WELL_LEVELED_MAX_LUFS = -13
 WELL_LEVELED_MAX_LRA = 12
 NORMALIZE_FILTER = "highpass=f=80,dynaudnorm"
+
+
+def _apply_config_tunables() -> None:
+    """Override chunking defaults from config.json when present."""
+    global CHUNK_DURATION_SEC, CHUNK_OVERLAP_SEC, MAX_CHUNK_RETRIES
+    try:
+        from config import Config
+        cfg = Config.load()
+        CHUNK_DURATION_SEC = int(cfg.chunk_duration_sec)
+        CHUNK_OVERLAP_SEC = int(cfg.chunk_overlap_sec)
+        MAX_CHUNK_RETRIES = int(cfg.max_chunk_retries)
+    except Exception:
+        pass  # fall back to compiled-in defaults
+
+
+_apply_config_tunables()
 
 
 def get_audio_duration(audio_path: str, ffmpeg_path: str = "ffmpeg") -> float:
@@ -1086,8 +1403,8 @@ def split_audio_ffmpeg(audio_path: str, output_dir: Path,
             subprocess.run(
                 [ffmpeg_path, "-y", "-i", audio_path,
                  "-ss", str(start), "-t", str(actual_duration),
-                 "-acodec", "libmp3lame", "-q:a", "2",
-                 "-ar", "44100", "-ac", "1",
+                 "-acodec", "libmp3lame", "-b:a", "48k",
+                 "-ar", "16000", "-ac", "1",
                  str(chunk_path)],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
                 **_no_window_kwargs()
@@ -1277,6 +1594,8 @@ class ChunkedTranscriber:
             duration_ms = get_audio_duration(audio_path, self.ffmpeg_path) * 1000
             return JianyingASR(audio_path, self.progress_callback,
                                start_time=0, end_time=int(duration_ms))
+        elif self.engine == "kuaishou":
+            return KuaiShouASR(audio_path, self.progress_callback)
         elif self.engine == "local":
             return SherpaLocalASR(audio_path, self.progress_callback, self.ffmpeg_path)
         else:  # "auto"
@@ -1420,6 +1739,11 @@ class ChunkedTranscriber:
 
             if chunk_failed.exists():
                 chunk_failed.unlink()
+
+            # Pacing: jittered pause between chunk submissions keeps the
+            # sustained request rate low on multi-hour files.
+            if i > 0:
+                time.sleep(random.uniform(*INTER_CHUNK_DELAY_RANGE))
 
             self._log(f"Chunk {i + 1}/{len(chunks)}: transcribing (offset {offset_sec:.0f}s)...")
 
