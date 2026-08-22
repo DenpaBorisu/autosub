@@ -752,7 +752,11 @@ def _multipart_body(field_name: str, filename: str, content_type: str,
 
 
 class KuaiShouASR:
-    """KuaiShou ASR - tier-3 fallback engine (independent of Bilibili/ByteDance).
+    """KuaiShou ASR - currently DISABLED and not wired into any engine chain.
+
+    The reverse-engineered endpoint returns "effect disabled" (code 501)
+    server-side, so every call wastes an upload and retries. Kept here,
+    unreferenced, for the day the endpoint works again.
 
     One synchronous multipart POST; the response already contains the
     utterances, so there is no polling and almost no rate-limit surface.
@@ -1063,12 +1067,13 @@ def _normalize_utterances(utterances: List[dict]) -> List[dict]:
 
 
 class AutoASR:
-    """Auto-fallback ASR: Bcut → JianYing → KuaiShou, with a per-engine
-    circuit breaker.
+    """Auto-fallback ASR: Bcut first, falls back to JianYing on failure,
+    with a per-engine circuit breaker.
 
     Once an engine trips its breaker (terminal HTTP block or repeated
     failures), subsequent chunks skip it for the cooldown instead of
-    hammering a blocked endpoint chunk after chunk.
+    hammering a blocked endpoint chunk after chunk. (KuaiShou is disabled —
+    its endpoint is dead server-side; see KuaiShouASR.)
     """
 
     def __init__(self, audio_path: str, progress_callback: Optional[Callable[[str], None]] = None,
@@ -1084,11 +1089,12 @@ class AutoASR:
             self.progress_callback(message)
 
     def _engine_factories(self):
+        # KuaiShou disabled: endpoint returns "effect disabled" (code 501)
+        # and just wastes time. Chain is Bcut → JianYing.
         return [
             ("Bcut", lambda: BcutASR(self.audio_path, self.progress_callback, self.model_id)),
             ("JianYing", lambda: JianyingASR(
                 self.audio_path, self.progress_callback, self.start_time, self.end_time)),
-            ("KuaiShou", lambda: KuaiShouASR(self.audio_path, self.progress_callback)),
         ]
 
     def transcribe(self) -> List[dict]:
@@ -1608,8 +1614,6 @@ class ChunkedTranscriber:
             duration_ms = get_audio_duration(audio_path, self.ffmpeg_path) * 1000
             return JianyingASR(audio_path, self.progress_callback,
                                start_time=0, end_time=int(duration_ms))
-        elif self.engine == "kuaishou":
-            return KuaiShouASR(audio_path, self.progress_callback)
         elif self.engine == "local":
             return SherpaLocalASR(audio_path, self.progress_callback, self.ffmpeg_path)
         else:  # "auto"
@@ -1625,8 +1629,6 @@ class ChunkedTranscriber:
             duration_ms = get_audio_duration(audio_path, self.ffmpeg_path) * 1000
             return JianyingASR(audio_path, self.progress_callback,
                                start_time=0, end_time=int(duration_ms))
-        if engine_name == "KuaiShou":
-            return KuaiShouASR(audio_path, self.progress_callback)
         raise ValueError(f"Unknown engine: {engine_name}")
 
     def _transcribe_chunk_pinned(self, i: int, total: int, chunk_path: Path,
@@ -1684,7 +1686,11 @@ class ChunkedTranscriber:
         Returns the list of failed chunk numbers, or None if the pool could
         not be used (fewer than two engines available).
         """
-        worker_engines = [n for n in ("Bcut", "JianYing", "KuaiShou")
+        # KuaiShou is disabled: its endpoint returns "effect disabled
+        # server-side" (code 501) and never recovers within a run, so it
+        # only wastes upload bandwidth and retry time. The class stays for
+        # the day the endpoint works again.
+        worker_engines = [n for n in ("Bcut", "JianYing")
                           if engine_available(n)]
         if len(worker_engines) < 2:
             return None
@@ -1985,7 +1991,7 @@ def transcribe_file(
         progress_callback: Optional callback for progress updates
         ffmpeg_path: Path to ffmpeg executable
         model_id: Bcut model ID
-        engine: ASR engine — "bcut", "jianying", "kuaishou", "local", or "auto" (default)
+        engine: ASR engine — "bcut", "jianying", "local", or "auto" (default)
         normalize_audio: Apply loudness normalization before upload (default True).
             Helps the ASR hear quiet-but-audible regions instead of misclassifying
             them as silence. Already well-leveled files are skipped automatically.

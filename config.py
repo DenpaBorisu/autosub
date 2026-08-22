@@ -26,7 +26,7 @@ class Config:
     # Audio preprocessing
     normalize_audio: bool = True
 
-    # ASR engine: "auto" (Bcut → JianYing → KuaiShou fallback chain) or "local" (sherpa-onnx)
+    # ASR engine: "auto" (Bcut with Jianying fallback) or "local" (sherpa-onnx)
     engine: str = "auto"
 
     # Cloud transcription tunables (consumed by transcribe_core)

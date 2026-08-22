@@ -252,7 +252,7 @@ class AutoSubWindow(QMainWindow):
 
         # Parallel cloud engines
         self.parallel_check = QCheckBox(
-            "Parallel cloud engines (chunks split across Bcut/JianYing/KuaiShou)")
+            "Parallel cloud engines (chunks split across Bcut/JianYing)")
         self.parallel_check.setChecked(self.config.parallel_engines)
         self.parallel_check.setStyleSheet("font-size: 11px;")
         self.parallel_check.toggled.connect(self._on_parallel_toggled)
