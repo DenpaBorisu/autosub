@@ -10,9 +10,9 @@ Grab the latest release for your platform:
 
 | Platform | Download | Notes |
 |----------|----------|-------|
-| **Windows** | [AutoSub-0.1.3-windows.zip](https://github.com/DenpaBorisu/autosub/releases/latest/download/AutoSub-0.1.3-windows.zip) | Extract and run `AutoSub 0.1.3.exe` — ffmpeg is bundled, nothing else to install |
-| **Linux** | [AutoSub-0.1.3-linux.zip](https://github.com/DenpaBorisu/autosub/releases/latest/download/AutoSub-0.1.3-linux.zip) | Extract and run `./AutoSub-0.1.3` — requires ffmpeg (`sudo apt install ffmpeg` or `sudo pacman -S ffmpeg`) |
-| **macOS** | [AutoSub-0.1.3-macos.zip](https://github.com/DenpaBorisu/autosub/releases/latest/download/AutoSub-0.1.3-macos.zip) | Extract and run `./AutoSub-0.1.3` — ffmpeg is bundled. Ad-hoc signed: on first launch right-click → Open, or run `xattr -dr com.apple.quarantine AutoSub-0.1.3`. x86_64 build — runs natively on Intel, via Rosetta 2 on Apple Silicon |
+| **Windows** | [AutoSub-0.2.0-windows.zip](https://github.com/DenpaBorisu/autosub/releases/latest/download/AutoSub-0.2.0-windows.zip) | Extract and run `AutoSub 0.2.0.exe` — ffmpeg is bundled, nothing else to install |
+| **Linux** | [AutoSub-0.2.0-linux.zip](https://github.com/DenpaBorisu/autosub/releases/latest/download/AutoSub-0.2.0-linux.zip) | Extract and run `./AutoSub-0.2.0` — requires ffmpeg (`sudo apt install ffmpeg` or `sudo pacman -S ffmpeg`) |
+| **macOS** | [AutoSub-0.2.0-macos.zip](https://github.com/DenpaBorisu/autosub/releases/latest/download/AutoSub-0.2.0-macos.zip) | Extract and run `./AutoSub-0.2.0` — ffmpeg is bundled. Ad-hoc signed: on first launch right-click → Open, or run `xattr -dr com.apple.quarantine AutoSub-0.2.0`. x86_64 build — runs natively on Intel, via Rosetta 2 on Apple Silicon |
 
 [All releases](https://github.com/DenpaBorisu/autosub/releases)
 
