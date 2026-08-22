@@ -1,11 +1,11 @@
 """
 Local sherpa-onnx model management.
 
-Downloads and verifies the sherpa-onnx bilingual Chinese + English streaming
-ASR Zipformer model (sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-
-2023-02-16) into a ``models/`` subfolder next to the script (or executable
-when frozen). The model is used by the local (fully offline) ASR engine and
-outputs Chinese characters and English words.
+Downloads and verifies the FireRedASR2 CTC bilingual Chinese + English ASR
+model (sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25) into a ``models/``
+subfolder next to the script (or executable when frozen). The model is used by
+the local (fully offline) ASR engine, outputs Chinese characters and English
+words, and emits per-token timestamps for subtitle generation.
 """
 import shutil
 import sys
@@ -15,26 +15,29 @@ import urllib.request
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
-# Chinese + English streaming Zipformer transducer ASR model. Outputs real
-# Chinese characters (not pinyin) and English text. ~40-50 MB tarball.
-MODEL_NAME = "sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16"
+# FireRedASR2 CTC bilingual Chinese + English ASR model (offline, int8).
+# SOTA Chinese accuracy per the FireRedASR2 paper and per-token timestamps.
+# ~520 MB tarball.
+MODEL_NAME = "sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25"
 MODEL_URL = (
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
     f"{MODEL_NAME}.tar.bz2"
 )
 
-ENCODER_CHUNK = "encoder-epoch-99-avg-1"
-DECODER_CHUNK = "decoder-epoch-99-avg-1"
-JOINER_CHUNK = "joiner-epoch-99-avg-1"
-
-# Files that must exist after extraction. Prefer quantized (int8) encoder/joiner,
-# keep fp32 decoder (quantization does not help it much).
+# Files that must exist after extraction.
 REQUIRED_FILES = {
-    "encoder": f"{ENCODER_CHUNK}.int8.onnx",
-    "decoder": f"{DECODER_CHUNK}.onnx",
-    "joiner": f"{JOINER_CHUNK}.int8.onnx",
+    "model": "model.int8.onnx",
     "tokens": "tokens.txt",
 }
+
+# Silero VAD ONNX model (~2 MB). Used to split long audio into speech segments
+# before feeding each to the (non-streaming) FireRedASR2 CTC recognizer, which
+# would otherwise blow up memory on multi-hour files.
+VAD_FILENAME = "silero_vad.onnx"
+VAD_URL = (
+    "https://github.com/snakers4/silero-vad/raw/master/"
+    "src/silero_vad/data/silero_vad.onnx"
+)
 
 DOWNLOAD_CHUNK_SIZE = 64 * 1024
 
@@ -55,43 +58,52 @@ def model_dir() -> Path:
 
 
 def is_model_downloaded() -> bool:
-    """True if all required model files are present."""
+    """True if all required model files (including the VAD) are present.
+
+    The VAD is counted here so the GUI gate matches what transcription
+    actually needs — otherwise a local run could be started and then fail
+    mid-flight with "VAD model missing".
+    """
     for _, filename in REQUIRED_FILES.items():
         if not (model_dir() / filename).is_file():
             return False
-    return True
+    return is_vad_downloaded()
+
+
+def vad_model_path() -> str:
+    """Return the absolute path of the silero VAD ONNX model."""
+    path = model_dir() / VAD_FILENAME
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing VAD model file: {path.name}")
+    return str(path)
+
+
+def is_vad_downloaded() -> bool:
+    return (model_dir() / VAD_FILENAME).is_file()
 
 
 def model_paths() -> Dict[str, str]:
     """Return absolute paths for the recognizer files.
 
-    Falls back to fp32 encoder/joiner if the int8 variants are missing.
     Raises FileNotFoundError if the model is not downloaded.
     """
     base = model_dir()
-
-    def _resolve(key: str) -> str:
-        path = base / REQUIRED_FILES[key]
+    paths: Dict[str, str] = {}
+    for key, filename in REQUIRED_FILES.items():
+        path = base / filename
         if path.is_file():
-            return str(path)
-        # Fall back to fp32 for encoder/joiner
-        if key == "encoder":
-            fp32 = base / f"{ENCODER_CHUNK}.onnx"
-            if fp32.is_file():
-                return str(fp32)
-        elif key == "joiner":
-            fp32 = base / f"{JOINER_CHUNK}.onnx"
-            if fp32.is_file():
-                return str(fp32)
-        raise FileNotFoundError(f"Missing model file: {path.name}")
-
-    return {key: _resolve(key) for key in REQUIRED_FILES}
+            paths[key] = str(path)
+        else:
+            raise FileNotFoundError(f"Missing model file: {path.name}")
+    return paths
 
 
 def model_status() -> str:
     """Human-readable model status for the GUI."""
     if is_model_downloaded():
-        return "Model ready"
+        if is_vad_downloaded():
+            return "Model ready"
+        return "Model ready — VAD missing (re-download)"
     if (model_dir() / (MODEL_NAME + ".tar.bz2")).exists():
         return "Model downloaded — incomplete (re-download)"
     return "Not downloaded"
@@ -134,6 +146,7 @@ def download_model(progress_cb: Callable[[int, int], None],
         for _, filename in REQUIRED_FILES.items():
             if not (target / filename).is_file():
                 raise RuntimeError(f"Model archive is missing expected file: {filename}")
+        _download_file(VAD_URL, target / VAD_FILENAME, progress_cb, should_cancel)
         return target
     except Exception:
         # Clean up partial downloads so a cancelled/failed attempt doesn't
@@ -145,6 +158,11 @@ def download_model(progress_cb: Callable[[int, int], None],
                 pass
         for suffix in (".part",):
             for path in models_dir().glob(f"{MODEL_NAME}.tar.bz2{suffix}"):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            for path in models_dir().glob(f"{MODEL_NAME}/{VAD_FILENAME}{suffix}"):
                 try:
                     path.unlink()
                 except OSError:
