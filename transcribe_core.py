@@ -1579,6 +1579,7 @@ class ChunkedTranscriber:
     def __init__(self, audio_path: str, output_srt: Path,
                  engine: str = "auto",
                  progress_callback: Optional[Callable[[str], None]] = None,
+                 progress_step: Optional[Callable[[int, int], None]] = None,
                  ffmpeg_path: str = "ffmpeg",
                  model_id: str = "8",
                  parallel: bool = False,
@@ -1587,6 +1588,7 @@ class ChunkedTranscriber:
         self.output_srt = output_srt
         self.engine = engine
         self.progress_callback = progress_callback
+        self.progress_step = progress_step
         self.ffmpeg_path = ffmpeg_path
         self.model_id = model_id
         # Name of the ORIGINAL media file (audio_path may be a cached
@@ -1597,6 +1599,8 @@ class ChunkedTranscriber:
         # a single pinned engine gains nothing from a pool.
         self._parallel = parallel and engine == "auto"
         self._log_lock = threading.Lock()
+        self._progress_lock = threading.Lock()
+        self._units_done = 0
 
     def _log(self, message: str) -> None:
         # Called from engine worker threads; the GUI callback routes into a
@@ -1605,6 +1609,28 @@ class ChunkedTranscriber:
         if self.progress_callback:
             with self._log_lock:
                 self.progress_callback(message)
+
+    def _report_progress(self, total_units: int) -> None:
+        """Push the current completed-units count through progress_step."""
+        if not self.progress_step:
+            return
+        with self._progress_lock:
+            done = self._units_done
+        try:
+            self.progress_step(done, total_units)
+        except Exception:
+            pass  # a broken UI callback must never kill transcription
+
+    def _bump_progress(self, total_units: int) -> None:
+        """Count one chunk as consumed — success OR failure — and report.
+
+        Failed chunks still advance the bar: their work is spent and they
+        will not be retried again this run, so not counting them would make
+        the bar stall on chunks that can never finish.
+        """
+        with self._progress_lock:
+            self._units_done += 1
+        self._report_progress(total_units)
 
     def _create_asr(self, audio_path: str):
         """Create the appropriate ASR instance for the selected engine."""
@@ -1733,6 +1759,8 @@ class ChunkedTranscriber:
                         (self.chunk_dir / f"chunk_{i:03d}.failed").write_text(str(e))
                     except OSError:
                         pass
+                finally:
+                    self._bump_progress(total)
 
         threads = [threading.Thread(target=run_worker, args=(name,),
                                     name=f"asr-{name}", daemon=True)
@@ -1798,6 +1826,7 @@ class ChunkedTranscriber:
 
             utterances: List[dict] = []
             last_error: Optional[Exception] = None
+            self._report_progress(1)
             for attempt in range(1, MAX_CHUNK_RETRIES + 1):
                 try:
                     asr = self._create_asr(self.audio_path)
@@ -1811,6 +1840,7 @@ class ChunkedTranscriber:
                         self._log(f"Attempt {attempt}/{MAX_CHUNK_RETRIES} failed — {e}; retrying in {delay}s")
                         time.sleep(delay)
                     else:
+                        self._bump_progress(1)
                         return False, f"Transcription failed after {MAX_CHUNK_RETRIES} attempts: {e}", 0
 
             if not utterances:
@@ -1818,6 +1848,7 @@ class ChunkedTranscriber:
 
             srt_content = utterances_to_srt(utterances)
             _write_srt_atomic(self.output_srt, srt_content)
+            self._bump_progress(1)
             return True, f"Created {self.output_srt.name} ({len(utterances)} segments)", len(utterances)
 
         self._log(f"Audio is {duration / 60:.1f} min — splitting into chunks")
@@ -1879,6 +1910,11 @@ class ChunkedTranscriber:
 
         failed_chunks: List[int] = []
 
+        # Cached chunks count toward progress immediately, so a resumed run
+        # starts with the bar where the previous run left off.
+        self._units_done = len(chunks) - len(pending)
+        self._report_progress(len(chunks))
+
         if pending:
             self._log(f"{len(pending)} chunk(s) to transcribe "
                       f"({len(chunks) - len(pending)} cached)")
@@ -1914,6 +1950,8 @@ class ChunkedTranscriber:
                         except OSError:
                             pass
                         failed_chunks.append(i + 1)
+                    finally:
+                        self._bump_progress(len(chunks))
 
         # Collect results from cached chunk SRTs. Reading back from disk (in
         # chunk order) makes the merge independent of completion order, which
@@ -1975,6 +2013,7 @@ def transcribe_file(
     output_path: Optional[Path] = None,
     overwrite: bool = False,
     progress_callback: Optional[Callable[[str], None]] = None,
+    progress_step: Optional[Callable[[int, int], None]] = None,
     ffmpeg_path: str = "ffmpeg",
     model_id: str = "8",
     engine: str = "auto",
@@ -1989,6 +2028,9 @@ def transcribe_file(
         output_path: Path for output SRT (default: same as input with .srt extension)
         overwrite: Overwrite existing SRT file
         progress_callback: Optional callback for progress updates
+        progress_step: Optional callback(done_units, total_units) reporting
+            chunk-level completion within this file; cached chunks count
+            immediately so resumed runs start where the last run stopped.
         ffmpeg_path: Path to ffmpeg executable
         model_id: Bcut model ID
         engine: ASR engine — "bcut", "jianying", "local", or "auto" (default)
@@ -2069,6 +2111,7 @@ def transcribe_file(
             output_srt=output_path,
             engine=engine,
             progress_callback=progress_callback,
+            progress_step=progress_step,
             ffmpeg_path=ffmpeg_path,
             model_id=model_id,
             parallel=parallel,

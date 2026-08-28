@@ -31,6 +31,8 @@ STATUS_ROLE = Qt.ItemDataRole.UserRole + 1  # Stores "ok" / "fail" per item
 class TranscribeWorker(QThread):
     progress = pyqtSignal(str)
     progress_percent = pyqtSignal(int, int)
+    file_started = pyqtSignal()
+    chunk_progress = pyqtSignal(int, int)
     file_complete = pyqtSignal(str, bool, str)
     finished = pyqtSignal(bool, str)
 
@@ -65,11 +67,14 @@ class TranscribeWorker(QThread):
             if self.config.output_dir:
                 srt_path = Path(self.config.output_dir) / srt_path.name
 
+            self.file_started.emit()
+
             try:
                 success, msg, count = transcribe_file(
                     file_path, output_path=srt_path,
                     overwrite=self.config.overwrite_srt,
                     progress_callback=lambda m: self.progress.emit(m),
+                    progress_step=lambda d, t: self.chunk_progress.emit(d, t),
                     ffmpeg_path=get_ffmpeg_path(),
                     model_id="8",
                     engine=self.engine,
@@ -180,6 +185,11 @@ class AutoSubWindow(QMainWindow):
         self.config = Config.load()
         self._processing_start_time: Optional[float] = None
         self._current_status_msg = ""
+        # Progress accounting: the bar combines file-level completion with
+        # chunk-level progress inside the current file (equal weight/file).
+        self._total_files = 0
+        self._files_done = 0
+        self._file_frac = 0.0
 
         self._setup_ui()
         self._restore_geometry()
@@ -572,6 +582,9 @@ class AutoSubWindow(QMainWindow):
         self.cancel_btn.setVisible(True)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
+        self._total_files = len(files)
+        self._files_done = 0
+        self._file_frac = 0.0
         self._processing_start_time = time.time()
         self._current_status_msg = f"Processing {len(files)} file(s)..."
         self.status_label.setText(self._current_status_msg)
@@ -587,6 +600,8 @@ class AutoSubWindow(QMainWindow):
         self.config.save()
         self.worker.progress.connect(self._on_progress)
         self.worker.progress_percent.connect(self._update_progress)
+        self.worker.file_started.connect(self._on_file_started)
+        self.worker.chunk_progress.connect(self._on_chunk_progress)
         self.worker.file_complete.connect(self._on_file_complete)
         self.worker.finished.connect(self._on_finished)
         self.worker.start()
@@ -617,8 +632,28 @@ class AutoSubWindow(QMainWindow):
         self.log_toggle_btn.setText("Hide log" if visible else "Show log")
 
     def _update_progress(self, current: int, total: int):
-        if total > 0:
-            self.progress_bar.setValue(int(current * 100 / total))
+        self._files_done = current
+        # A finished (or terminally failed) file consumes its full unit;
+        # zeroing here keeps the bar exactly on the boundary instead of
+        # showing a stale fraction until the next file_started arrives.
+        self._file_frac = 0.0
+        self._recompute_bar()
+
+    def _on_file_started(self):
+        # Drop the previous file's chunk fraction so a file that failed
+        # mid-run can't make (files_done + frac) overshoot the boundary.
+        self._file_frac = 0.0
+        self._recompute_bar()
+
+    def _on_chunk_progress(self, done: int, total: int):
+        self._file_frac = min(done / total, 1.0) if total > 0 else 1.0
+        self._recompute_bar()
+
+    def _recompute_bar(self):
+        if self._total_files <= 0:
+            return
+        pct = int(100 * (self._files_done + self._file_frac) / self._total_files)
+        self.progress_bar.setValue(min(pct, 100))
         self._update_status_with_eta()
 
     def _update_status_with_eta(self):
