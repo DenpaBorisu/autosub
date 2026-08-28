@@ -25,7 +25,7 @@ build-windows:
     - cp ffmpeg-master-latest-win64-gpl/bin/ffmpeg.exe .
     - cp ffmpeg-master-latest-win64-gpl/bin/ffprobe.exe .
     # Build executable
-    - pyinstaller --onefile --windowed --name AutoSub --add-binary "ffmpeg.exe;." --add-binary "ffprobe.exe;." autosub_gui.py
+    - pyinstaller --onefile --windowed --name AutoSub --icon assets/autosub_icon.ico --add-binary "ffmpeg.exe;." --add-binary "ffprobe.exe;." autosub_gui.py
   artifacts:
     name: AutoSub-windows
     paths:
@@ -56,6 +56,7 @@ build-linux:
         --enable-plugin=pyqt6
         --remove-output
         --lto=yes
+        --linux-icon=assets/autosub_icon.png
         --nofollow-import-to=PyQt6.QtNetwork
         --nofollow-import-to=PyQt6.QtSql
         --nofollow-import-to=PyQt6.QtTest

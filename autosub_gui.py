@@ -14,14 +14,17 @@ from typing import List, Optional
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QProgressBar, QFileDialog, QMessageBox,
-    QTextEdit, QListWidget, QListWidgetItem, QCheckBox, QComboBox
+    QTextEdit, QListWidget, QListWidgetItem, QCheckBox, QComboBox, QStyle
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QColor, QIcon, QPalette
+from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QColor, QPalette
 
 from transcribe_core import transcribe_file, get_audio_files, SUPPORTED_EXTENSIONS, get_ffmpeg_path
 from local_model import is_model_downloaded, model_status, download_model
 from config import Config
+import app_icon
+
+APP_VERSION = "0.2.1"
 
 MEDIA_EXTENSIONS = SUPPORTED_EXTENSIONS
 
@@ -34,7 +37,9 @@ class TranscribeWorker(QThread):
     file_started = pyqtSignal()
     chunk_progress = pyqtSignal(int, int)
     file_complete = pyqtSignal(str, bool, str)
-    finished = pyqtSignal(bool, str)
+    # Named run_finished (not finished) so QThread's built-in finished
+    # signal stays reachable; shadowing it would be a trap later.
+    run_finished = pyqtSignal(bool, str)
 
     def __init__(self, files: List[Path], config: Config,
                  normalize_audio: bool = True, engine: str = "auto",
@@ -96,7 +101,7 @@ class TranscribeWorker(QThread):
             self.progress_percent.emit(i + 1, total)
 
         if not self._is_running:
-            self.finished.emit(False, "Cancelled")
+            self.run_finished.emit(False, "Cancelled")
             return
 
         # Clean up .chunks directories ONLY for files that succeeded.
@@ -127,7 +132,7 @@ class TranscribeWorker(QThread):
             extra += " — completed chunks are cached."
             msg += extra
 
-        self.finished.emit(fail_count == 0, msg)
+        self.run_finished.emit(fail_count == 0, msg)
 
 
 class ModelDownloadWorker(QThread):
@@ -195,9 +200,13 @@ class AutoSubWindow(QMainWindow):
         self._restore_geometry()
 
     def _setup_ui(self):
-        self.setWindowTitle("AutoSub")
+        self.setWindowTitle(f"AutoSub {APP_VERSION}")
         self.resize(700, 480)
         self.setMinimumSize(500, 350)
+
+        help_menu = self.menuBar().addMenu("Help")
+        about_action = help_menu.addAction("About AutoSub")
+        about_action.triggered.connect(self._show_about)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -211,13 +220,9 @@ class AutoSubWindow(QMainWindow):
         files_label.setStyleSheet("font-weight: bold;")
         main_layout.addWidget(files_label)
 
-        hint = QLabel("Drop video or audio files here or click Add Files")
-        hint.setStyleSheet("color: #aaa; font-size: 11px;")
-        hint.setWordWrap(True)
-        main_layout.addWidget(hint)
-
         self.file_list = DropListWidget(self)
-        self.file_list.addItem("Drop video or audio files here")
+        self.file_list.addItem(
+            "Drop video or audio files here (or click Add Files)")
         item = self.file_list.item(0)
         item.setFlags(Qt.ItemFlag.NoItemFlags)
         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -242,18 +247,18 @@ class AutoSubWindow(QMainWindow):
         self.normalize_check = QCheckBox(
             "Normalize audio (fixes quiet/silent regions)")
         self.normalize_check.setChecked(self.config.normalize_audio)
-        self.normalize_check.setStyleSheet("font-size: 11px;")
+        self.normalize_check.setStyleSheet("font-size: 12px;")
         main_layout.addWidget(self.normalize_check)
 
         # Engine selection
         engine_row = QHBoxLayout()
         engine_label = QLabel("Engine:")
-        engine_label.setStyleSheet("font-size: 11px;")
+        engine_label.setStyleSheet("font-size: 12px;")
         self.engine_combo = QComboBox()
         self.engine_combo.addItem("Bcut/Jianying (cloud)")
         self.engine_combo.addItem("Local Sherpa (offline)")
         self.engine_combo.setCurrentIndex(0 if self.config.engine != "local" else 1)
-        self.engine_combo.setStyleSheet("font-size: 11px;")
+        self.engine_combo.setStyleSheet("font-size: 12px;")
         self.engine_combo.currentIndexChanged.connect(self._on_engine_changed)
         engine_row.addWidget(engine_label)
         engine_row.addWidget(self.engine_combo)
@@ -264,7 +269,7 @@ class AutoSubWindow(QMainWindow):
         self.parallel_check = QCheckBox(
             "Parallel cloud engines (chunks split across Bcut/JianYing)")
         self.parallel_check.setChecked(self.config.parallel_engines)
-        self.parallel_check.setStyleSheet("font-size: 11px;")
+        self.parallel_check.setStyleSheet("font-size: 12px;")
         self.parallel_check.toggled.connect(self._on_parallel_toggled)
         # Cloud-only option: meaningless (and silently ignored) for the
         # local engine, so only show it when the cloud engine is selected.
@@ -273,10 +278,10 @@ class AutoSubWindow(QMainWindow):
         # Local model management
         model_row = QHBoxLayout()
         self.download_model_btn = QPushButton("Download local model")
-        self.download_model_btn.setStyleSheet("font-size: 11px; padding: 4px 10px;")
+        self.download_model_btn.setStyleSheet("font-size: 12px; padding: 4px 10px;")
         self.download_model_btn.clicked.connect(self._download_local_model)
         self.model_status_label = QLabel()
-        self.model_status_label.setStyleSheet("font-size: 11px;")
+        self.model_status_label.setStyleSheet("font-size: 12px;")
         model_row.addWidget(self.download_model_btn)
         model_row.addWidget(self.model_status_label)
         model_row.addStretch()
@@ -310,14 +315,14 @@ class AutoSubWindow(QMainWindow):
 
         # Status
         self.status_label = QLabel()
-        self.status_label.setStyleSheet("font-size: 11px;")
+        self.status_label.setStyleSheet("font-size: 12px;")
         self.status_label.setWordWrap(True)
         main_layout.addWidget(self.status_label)
 
         # Log toggle
         self.log_toggle_btn = QPushButton("Show log")
         self.log_toggle_btn.setFlat(True)
-        self.log_toggle_btn.setStyleSheet("color: #aaa; font-size: 10px; padding: 2px 4px; text-align: left; border: none;")
+        self.log_toggle_btn.setStyleSheet("color: #aaa; font-size: 11px; padding: 2px 4px; text-align: left; border: none;")
         self.log_toggle_btn.clicked.connect(self._toggle_log)
         main_layout.addWidget(self.log_toggle_btn)
 
@@ -329,7 +334,7 @@ class AutoSubWindow(QMainWindow):
         self.log_text.setStyleSheet("""
             QTextEdit {
                 font-family: monospace;
-                font-size: 11px;
+                font-size: 12px;
                 padding: 4px;
             }
         """)
@@ -339,20 +344,28 @@ class AutoSubWindow(QMainWindow):
         self._apply_stylesheet()
 
     def _apply_stylesheet(self):
+        # Hardcoded colors (not palette()) because the app forces its own
+        # dark palette on every platform; this keeps the disabled/hover
+        # states readable instead of blending into the background.
         self.setStyleSheet("""
             QPushButton[primary="true"] {
-                background-color: palette(highlight);
-                color: palette(highlighted-text);
+                background-color: #89b4fa;
+                color: #11111b;
                 border: none;
                 border-radius: 6px;
                 padding: 8px 24px;
                 font-weight: bold;
                 font-size: 14px;
             }
-            QPushButton[primary="true"]:hover { opacity: 0.9; }
+            QPushButton[primary="true"]:hover {
+                background-color: #9cc1fb;
+            }
+            QPushButton[primary="true"]:pressed {
+                background-color: #7ba3ee;
+            }
             QPushButton[primary="true"]:disabled {
-                background-color: palette(mid);
-                color: palette(mid);
+                background-color: #313244;
+                color: #7f849c;
             }
         """)
 
@@ -362,6 +375,17 @@ class AutoSubWindow(QMainWindow):
             self.showMaximized()
 
     def closeEvent(self, event):
+        worker = getattr(self, 'worker', None)
+        if worker is not None and worker.isRunning():
+            reply = QMessageBox.question(
+                self, "Quit AutoSub?",
+                "Transcription is still running.\n\nQuit and discard the current run?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if reply != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            self._stop_worker(worker)
         self.config.window_width = self.width()
         self.config.window_height = self.height()
         self.config.window_maximized = self.isMaximized()
@@ -371,6 +395,19 @@ class AutoSubWindow(QMainWindow):
             dw.cancel()
             dw.wait(5000)
         super().closeEvent(event)
+
+    @staticmethod
+    def _stop_worker(worker: QThread):
+        """Ask the worker to stop, then wait briefly; hard-stop as fallback.
+
+        The stop flag only takes effect between files, so if the worker is
+        mid-file we terminate rather than leave the UI hanging. Atomic SRT
+        writes keep output files consistent either way.
+        """
+        worker.stop()
+        if not worker.wait(750):
+            worker.terminate()
+            worker.wait(10000)
 
     def _is_media_file(self, path: Path) -> bool:
         return path.suffix.lower() in MEDIA_EXTENSIONS
@@ -414,7 +451,7 @@ class AutoSubWindow(QMainWindow):
 
     def _clear_files(self):
         self.file_list.clear()
-        item = QListWidgetItem("Drop video or audio files here")
+        item = QListWidgetItem("Drop video or audio files here (or click Add Files)")
         item.setFlags(Qt.ItemFlag.NoItemFlags)
         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         item.setForeground(QColor("#888"))
@@ -433,9 +470,10 @@ class AutoSubWindow(QMainWindow):
             item.setBackground(QColor("#3a1b1b"))
             item.setForeground(QColor("#f44336"))
             item.setData(STATUS_ROLE, "fail")
-        icon = QIcon.fromTheme("dialog-ok" if success else "dialog-error")
-        if not icon.isNull():
-            item.setIcon(icon)
+        icon = self.style().standardIcon(
+            QStyle.StandardPixmap.SP_DialogApplyButton if success
+            else QStyle.StandardPixmap.SP_DialogCancelButton)
+        item.setIcon(icon)
 
     def _get_file_paths(self) -> List[Path]:
         paths = []
@@ -489,9 +527,9 @@ class AutoSubWindow(QMainWindow):
         status = model_status()
         self.model_status_label.setText(status)
         if local_selected and not is_model_downloaded():
-            self.model_status_label.setStyleSheet("color: #f38ba8; font-size: 11px;")
+            self.model_status_label.setStyleSheet("color: #f38ba8; font-size: 12px;")
         else:
-            self.model_status_label.setStyleSheet("font-size: 11px;")
+            self.model_status_label.setStyleSheet("font-size: 12px;")
 
     def _download_local_model(self):
         if getattr(self, 'download_worker', None) is not None and self.download_worker.isRunning():
@@ -603,17 +641,18 @@ class AutoSubWindow(QMainWindow):
         self.worker.file_started.connect(self._on_file_started)
         self.worker.chunk_progress.connect(self._on_chunk_progress)
         self.worker.file_complete.connect(self._on_file_complete)
-        self.worker.finished.connect(self._on_finished)
+        self.worker.run_finished.connect(self._on_finished)
         self.worker.start()
 
     def _cancel_processing(self):
-        if hasattr(self, 'worker') and self.worker.isRunning():
-            self.worker.stop()
-            self.worker.terminate()
-            self.worker.wait(3000)
-            self.cancel_btn.setEnabled(False)
-            self.status_label.setText("Cancelled")
-            self._append_log("Cancelled by user")
+        worker = getattr(self, 'worker', None)
+        if worker is None or not worker.isRunning():
+            return
+        self.cancel_btn.setEnabled(False)
+        self.status_label.setText("Cancelling...")
+        self._append_log("Cancelled by user")
+        self._stop_worker(worker)
+        self.status_label.setText("Cancelled")
 
     def _on_progress(self, msg: str):
         self._current_status_msg = msg
@@ -630,6 +669,16 @@ class AutoSubWindow(QMainWindow):
         visible = self.log_text.isVisible()
         self.log_text.setVisible(not visible)
         self.log_toggle_btn.setText("Hide log" if visible else "Show log")
+
+    def _show_about(self):
+        QMessageBox.about(
+            self, "About AutoSub",
+            f"<b>AutoSub {APP_VERSION}</b><br><br>"
+            "Drag-and-drop audio/video to subtitle (.srt) transcription.<br>"
+            "Cloud engines: Bcut / JianYing &middot; "
+            "Local engine: FireRedASR2 (offline).<br><br>"
+            "GPL-3.0 &middot; "
+            "<a href='https://github.com/DenpaBorisu/autosub'>github.com/DenpaBorisu/autosub</a>")
 
     def _update_progress(self, current: int, total: int):
         self._files_done = current
@@ -738,6 +787,8 @@ def _apply_dark_theme(app: QApplication) -> None:
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("AutoSub")
+    app.setApplicationVersion(APP_VERSION)
+    app.setWindowIcon(app_icon.app_icon())
     _apply_dark_theme(app)
 
     window = AutoSubWindow()

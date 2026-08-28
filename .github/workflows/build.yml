@@ -43,6 +43,7 @@ jobs:
           pyinstaller --onefile --windowed
           --add-binary "ffmpeg.exe;."
           --add-binary "ffprobe.exe;."
+          --icon "assets/autosub_icon.ico"
           --exclude-module PyQt6.QtNetwork
           --exclude-module PyQt6.QtSql
           --exclude-module PyQt6.QtTest
@@ -131,6 +132,7 @@ jobs:
             --enable-plugin=pyqt6 \
             --remove-output \
             --lto=yes \
+            --linux-icon=assets/autosub_icon.png \
             --nofollow-import-to=PyQt6.QtNetwork \
             --nofollow-import-to=PyQt6.QtSql \
             --nofollow-import-to=PyQt6.QtTest \
@@ -228,7 +230,8 @@ jobs:
 
       - name: Build executable
         run: |
-          .venv/bin/pyinstaller --onefile --name AutoSub \
+          .venv/bin/pyinstaller --onefile --windowed --name AutoSub \
+            --icon assets/autosub_icon.icns \
             --add-binary "ffmpeg:." \
             --add-binary "ffprobe:." \
             --exclude-module PyQt6.QtNetwork \
